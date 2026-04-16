@@ -1,0 +1,33 @@
+{
+  "name": "@screenshot/web-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/screenShotPlugin.umd.js",
+  "module": "./dist/screenShotPlugin.es.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "build:demo": "vite build -c vite.demo.config.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@screenshot/editor-core": "0.1.0",
+    "@screenshot/editor-react": "0.1.0",
+    "oidc-client-ts": "^3.4.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tesseract.js": "^5.1.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "vite": "^5.4.2",
+    "vite-plugin-dts": "^3.9.1"
+  }
+}

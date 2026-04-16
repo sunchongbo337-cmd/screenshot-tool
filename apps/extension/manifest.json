@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "ScreenShot (Ctrl+Shift+A)",
+  "version": "0.1.0",
+  "description": "Global-ish Ctrl+Shift+A screen capture with selection overlay.",
+  "action": {
+    "default_title": "ScreenShot"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "permissions": ["activeTab", "tabs", "scripting", "storage", "offscreen"],
+  "host_permissions": ["<all_urls>"],
+  "commands": {
+    "capture": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+A"
+      },
+      "description": "Capture screen (show selection overlay)"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["overlay.css"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
+

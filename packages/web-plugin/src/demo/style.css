@@ -1,0 +1,414 @@
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  background: radial-gradient(circle at top left, #1f2937 0, #050816 55%, #020617 100%);
+  color: #e7eaf0;
+}
+
+.page {
+  height: 100%;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.topbar {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(16, 18, 25, 0.9);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  justify-content: center;
+}
+
+.captureBar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+  color: #111;
+  touch-action: none;
+}
+
+.captureBar.draggable {
+  cursor: grab;
+}
+
+.captureBar.dragging {
+  cursor: grabbing;
+  user-select: none;
+}
+
+.iconBtn {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: inherit;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 34px;
+  display: grid;
+  place-items: center;
+  user-select: none;
+}
+
+.iconBtn:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.iconBtn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.iconBtn.active {
+  border-color: rgba(76, 159, 254, 0.8);
+  background: rgba(76, 159, 254, 0.18);
+}
+
+.iconBtn.hint {
+  border-color: rgba(76, 159, 254, 0.8);
+  background: transparent;
+}
+
+.iconBtn.danger {
+  color: #ff3b30;
+}
+
+.iconBtn.ok {
+  color: #2ecc71;
+}
+
+.captureSep {
+  width: 1px;
+  height: 22px;
+  background: rgba(0, 0, 0, 0.18);
+  margin: 0 2px;
+}
+
+.formatSelect {
+  appearance: none;
+  border: 1px solid rgba(0, 0, 0, 0.14);
+  background-color: rgba(0, 0, 0, 0.06);
+  color: #111;
+  padding: 6px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 12px;
+  height: 34px;
+}
+
+.formatSelect:hover {
+  background-color: rgba(0, 0, 0, 0.09);
+}
+
+.captureBar details.menu {
+  position: relative;
+}
+
+.captureBar details.menu > summary {
+  list-style: none;
+}
+
+.captureBar details.menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.captureBar details.menu > summary.iconBtn {
+  border: 1px solid transparent;
+}
+
+.captureBar details.menu[open] > summary.iconBtn {
+  border-color: rgba(76, 159, 254, 0.8);
+  background: rgba(76, 159, 254, 0.18);
+}
+
+.captureBar .menuPanel {
+  top: calc(100% + 10px);
+  left: 0;
+  background: #000;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: #fff;
+}
+
+.captureBar .menuPanel .menuTitle,
+.captureBar .menuPanel .menuRow button:not([style*="background"]) {
+  color: #fff;
+}
+
+.captureBar .menuPanel button {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.25);
+  color: #fff;
+}
+
+.captureBar .menuPanel button:hover {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.captureBar .menuPanel button.active {
+  border-color: rgba(76, 159, 254, 0.9);
+  background: rgba(76, 159, 254, 0.25);
+  color: #fff;
+}
+
+/* 下拉框箭头，表示可点击选择 */
+.selectWithArrow,
+.formatSelect {
+  padding-right: 26px;
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 12px;
+}
+
+.captureBar .menuPanel .selectWithArrow {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+}
+
+.formatSelect {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23333' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+}
+
+.captureBar .menuPanel select {
+  background-color: #000 !important;
+  color: #fff !important;
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.captureBar .menuPanel select option {
+  background: #000;
+  color: #fff;
+}
+
+.group {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.spacer {
+  flex: 1;
+}
+
+button,
+select,
+.fileBtn {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+  padding: 7px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  outline: none;
+}
+
+select {
+  background-color: #000 !important;
+  color: #fff !important;
+}
+
+select option {
+  background-color: #000;
+  color: #fff;
+}
+
+details.menu {
+  position: relative;
+}
+
+details.menu > summary {
+  list-style: none;
+}
+
+details.menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+details.menu > summary {
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+  padding: 7px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  user-select: none;
+}
+
+details.menu > summary:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+details.menu > summary.active {
+  border-color: rgba(76, 159, 254, 0.8);
+  background: rgba(76, 159, 254, 0.16);
+}
+
+.caret {
+  opacity: 0.7;
+  margin-left: 6px;
+}
+
+.menuPanel {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  min-width: 220px;
+  padding: 10px;
+  border-radius: 12px;
+  background: rgba(16, 18, 25, 0.98);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.55);
+  z-index: 3;
+}
+
+.menuSection + .menuSection {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.menuTitle {
+  font-size: 12px;
+  opacity: 0.75;
+  margin-bottom: 8px;
+}
+
+.menuRow {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.brushSizeRow {
+  align-items: center;
+  gap: 10px;
+}
+
+.brushSizeBtn {
+  flex-shrink: 0;
+}
+
+button:hover,
+.fileBtn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+select:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+.captureBar .menuPanel .selectWithArrow:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+.formatSelect:hover {
+  background-color: rgba(0, 0, 0, 0.09);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+button.active {
+  border-color: rgba(76, 159, 254, 0.8);
+  background: rgba(76, 159, 254, 0.16);
+}
+
+.fileBtn input {
+  display: none;
+}
+
+.content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
+}
+
+.empty {
+  margin: auto;
+  align-self: stretch;
+  display: grid;
+  place-items: center;
+  padding: 32px 24px;
+}
+
+.emptyCard {
+  max-width: 520px;
+  width: 100%;
+  padding: 24px 24px 20px;
+  border-radius: 18px;
+  background: linear-gradient(135deg, rgba(37, 99, 235, 0.18), rgba(147, 51, 234, 0.2));
+  border: 1px solid rgba(148, 163, 184, 0.6);
+  box-shadow: 0 30px 80px rgba(15, 23, 42, 0.9);
+}
+
+.emptyTitle {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+.emptySubtitle {
+  margin-top: 8px;
+  font-size: 13px;
+  opacity: 0.85;
+}
+
+.emptyActions {
+  margin-top: 18px;
+  display: flex;
+  gap: 12px;
+}
+
+.emptyActions .secondary {
+  flex: 1;
+  padding: 12px 16px;
+  font-size: 14px;
+  background: rgba(15, 23, 42, 0.85);
+  border-color: rgba(148, 163, 184, 0.9);
+}
+
+.emptyActions .secondary:hover {
+  background: rgba(15, 23, 42, 0.95);
+}
+
+.emptyHint {
+  margin-top: 14px;
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+.editorHost {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  min-width: 0;
+  position: relative;
+  overflow: hidden;
+}
+

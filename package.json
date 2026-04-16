@@ -1,0 +1,24 @@
+{
+  "name": "screenshot-tool",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev:server": "npm run dev -w @screenshot/server",
+    "dev:web": "npm run dev -w @screenshot/web-plugin",
+    "build:web": "npm run build -w @screenshot/web-plugin",
+    "dist:web": "npm run build:web && npm run build:demo -w @screenshot/web-plugin",
+    "dev:desktop": "npm run dev -w @screenshot/desktop",
+    "build:desktop": "npm run build -w @screenshot/desktop",
+    "dist:desktop": "npm run build:desktop && npm run dist -w @screenshot/desktop",
+    "dist:desktop:portable": "powershell -NoProfile -Command \"$src='apps/desktop/release/win-unpacked/ScreenShot.exe'; if (!(Test-Path $src)) { throw 'win-unpacked not found; run npm run dist:desktop once (or build unpacked) first.' }; $out='apps/desktop/release/ScreenShot-win-portable.zip'; if (Test-Path $out) { Remove-Item $out -Force }; Compress-Archive -Path 'apps/desktop/release/win-unpacked/*' -DestinationPath $out\"",
+    "lint": "npm run lint -ws",
+    "typecheck": "npm run typecheck -ws"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}
+
