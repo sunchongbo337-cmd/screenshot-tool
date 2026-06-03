@@ -49,6 +49,10 @@ export type ArrowNode = BaseNode & {
   strokeWidth: number;
   pointerLength: number;
   pointerWidth: number;
+  /** 0–1, default 1. */
+  opacity?: number;
+  /** Drop shadow when true. */
+  shadow?: boolean;
 };
 
 export type TextNode = BaseNode & {
@@ -86,6 +90,10 @@ export type TextNode = BaseNode & {
   letterSpacing?: number;
   /** Font weight for the whole text node. */
   fontWeight?: 'normal' | 'bold' | number;
+  /** Italic style. */
+  fontItalic?: boolean;
+  /** Underline decoration. */
+  underline?: boolean;
 };
 
 export type EditorNode = MosaicRectNode | MosaicStrokeNode | ArrowNode | TextNode;
@@ -119,6 +127,8 @@ export type Tool =
       strokeWidth: number;
       pointerLength: number;
       pointerWidth: number;
+      opacity?: number;
+      shadow?: boolean;
     }
   | {
       kind: 'text';
@@ -131,6 +141,8 @@ export type Tool =
       lineHeight?: number;
       letterSpacing?: number;
       fontWeight?: 'normal' | 'bold' | number;
+      fontItalic?: boolean;
+      underline?: boolean;
     };
 
 export type ExportOptions = {

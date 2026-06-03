@@ -1,6 +1,7 @@
 import React, { useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
-import { Arrow, Group, Image as KonvaImage, Layer, Line, Rect, Stage, Text, Transformer } from 'react-konva';
+import { Arrow, Ellipse, Group, Image as KonvaImage, Layer, Line, Rect, Stage, Text, Transformer } from 'react-konva';
 import Konva from 'konva';
+import { canvasFontString, konvaFontStyle, konvaTextDecoration } from '../text/text-style.js';
 import {
   addArrow,
   addMosaicRect,
@@ -10,10 +11,12 @@ import {
   canUndo,
   createEmptyDocument,
   createHistory,
+  cropDocumentToRegion,
   exportCanvasToBlob,
   pushHistory,
   redo,
   removeNode,
+  removeNodesByIds,
   undo,
   updateNode
 } from '@screenshot/editor-core';
@@ -33,6 +36,21 @@ import type {
   ImageSource,
   MosaicRectInput
 } from './types.js';
+import {
+  applyCropShapeMask,
+  boundsFromPoints,
+  clampCropBoxToBounds,
+  clampCropBoxToDocument,
+  cropBoxFromPointerDrag,
+  exportContentBoundsInDocument,
+  DEFAULT_CROP_OPTIONS,
+  isCropSelectionValid,
+  pointInCropSelection,
+  toCircleBox,
+  type CropBox,
+  type CropOptions,
+  type CropSelection
+} from './crop-utils.js';
 
 async function loadHtmlImage(src: string): Promise<HTMLImageElement> {
   return await new Promise((resolve, reject) => {
@@ -41,6 +59,23 @@ async function loadHtmlImage(src: string): Promise<HTMLImageElement> {
     img.onerror = () => reject(new Error('Failed to load image'));
     img.src = src;
   });
+}
+
+async function blobToDataUrl(blob: Blob): Promise<string> {
+  return await new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result));
+    r.onerror = () => reject(r.error ?? new Error('read failed'));
+    r.readAsDataURL(blob);
+  });
+}
+
+/** Tesseract needs a data URL; document background may be a blob: object URL. */
+async function ensureDataUrlForOcr(src: string): Promise<string> {
+  if (src.startsWith('data:image/')) return src;
+  const res = await fetch(src);
+  if (!res.ok) throw new Error(`Failed to load background for OCR (${res.status})`);
+  return blobToDataUrl(await res.blob());
 }
 
 function normalizeRect(a: { x: number; y: number }, b: { x: number; y: number }) {
@@ -127,25 +162,67 @@ function arrowBounds(a: ArrowNode): { x: number; y: number; width: number; heigh
   return { x: minX - pad, y: minY - pad, width: maxX - minX + pad * 2, height: maxY - minY + pad * 2 };
 }
 
+const TEXT_RENDER_PADDING = 6;
+
+function measureTextBlock(
+  text: string,
+  fontSize: number,
+  fontFamily: string,
+  padding: number,
+  lineHeight = 1.25,
+  fontWeight?: TextNode['fontWeight'],
+  fontItalic?: boolean
+): { width: number; height: number } {
+  const pad = padding * 2 + TEXT_RENDER_PADDING * 2;
+  const lh = lineHeight * fontSize;
+  const lines = (text || ' ').replace(/\r\n/g, '\n').split('\n');
+  const lineCount = Math.max(1, lines.length);
+
+  if (typeof document === 'undefined') {
+    return { width: Math.max(80, lines[0]!.length * fontSize * 0.6 + pad), height: lineCount * lh + pad };
+  }
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    return { width: Math.max(80, lines[0]!.length * fontSize * 0.6 + pad), height: lineCount * lh + pad };
+  }
+  ctx.font = canvasFontString(fontSize, fontFamily, fontWeight, fontItalic);
+  let maxW = fontSize;
+  for (const line of lines) {
+    maxW = Math.max(maxW, ctx.measureText(line || ' ').width);
+  }
+  return { width: Math.ceil(maxW) + pad, height: Math.ceil(lineCount * lh) + pad };
+}
+
+/** Horizontal layout: only explicit newlines break lines (no auto word-wrap). */
+function textKonvaWrap(_t: TextNode): 'none' {
+  return 'none';
+}
+
+function textKonvaWidth(t: TextNode): number | undefined {
+  const measured = measureTextBlock(
+    t.text ?? '',
+    t.fontSize,
+    t.fontFamily,
+    (t.padding ?? 0) + TEXT_RENDER_PADDING,
+    t.lineHeight ?? 1.25,
+    t.fontWeight,
+    t.fontItalic
+  );
+  return measured.width;
+}
+
 function textBoundsApprox(t: TextNode): { x: number; y: number; width: number; height: number } {
-  const w = t.width ?? 320;
-  // Approx height:
-  // - singleLine: 1 line
-  // - area: estimate wrapped lines by width and character count (good enough for mosaic splitting)
-  const lh = (t.lineHeight ?? 1.25) * t.fontSize;
-  const pad = (t.padding ?? 0) * 2;
-  const txt = (t.text ?? '').replace(/\r\n/g, '\n');
-  const explicitLines = txt.split('\n');
-  const avgCharW = t.fontSize * 0.6;
-  const estLineCountFor = (line: string) => {
-    if (t.mode !== 'area') return 1;
-    const usableW = Math.max(20, w - pad);
-    const est = Math.ceil((line.length * avgCharW) / usableW);
-    return Math.max(1, est);
-  };
-  const lines = explicitLines.reduce((sum, line) => sum + estLineCountFor(line), 0);
-  const h = Math.max(24, lines * lh + pad);
-  return { x: t.x, y: t.y, width: w, height: h };
+  const measured = measureTextBlock(
+    t.text ?? '',
+    t.fontSize,
+    t.fontFamily,
+    (t.padding ?? 0) + TEXT_RENDER_PADDING,
+    t.lineHeight ?? 1.25,
+    t.fontWeight,
+    t.fontItalic
+  );
+  return { x: t.x, y: t.y, width: measured.width, height: measured.height };
 }
 
 function splitNodeByRegion(
@@ -235,6 +312,116 @@ function strokeBounds(s: MosaicStrokeNode): { x: number; y: number; width: numbe
   return { x: minX - r, y: minY - r, width: maxX - minX + r * 2, height: maxY - minY + r * 2 };
 }
 
+function mosaicNodeBounds(n: EditorNode): { x: number; y: number; width: number; height: number } | null {
+  if (n.kind === 'mosaicRect') return { x: n.x, y: n.y, width: n.width, height: n.height };
+  if (n.kind === 'mosaicStroke') return strokeBounds(n);
+  return null;
+}
+
+/** Seed: primary selected if it is a mosaic, else first mosaic in multi-selection. */
+function findSeedMosaicId(
+  selectedId: string | null,
+  selectedMosaicIds: readonly string[],
+  doc: EditorDocument
+): string | null {
+  if (selectedId) {
+    const n = doc.nodes.find((nn) => nn.id === selectedId);
+    if (n && (n.kind === 'mosaicRect' || n.kind === 'mosaicStroke')) return selectedId;
+  }
+  for (const id of selectedMosaicIds) {
+    const n = doc.nodes.find((nn) => nn.id === id);
+    if (n && (n.kind === 'mosaicRect' || n.kind === 'mosaicStroke')) return id;
+  }
+  return null;
+}
+
+/** Same row: horizontal midline of seed passes through the mosaic's vertical span. */
+function collectSameRowMosaicIds(doc: EditorDocument, seedId: string): string[] {
+  const seed = doc.nodes.find((n) => n.id === seedId);
+  if (!seed || (seed.kind !== 'mosaicRect' && seed.kind !== 'mosaicStroke')) return [];
+  const b = mosaicNodeBounds(seed);
+  if (!b || b.height <= 0) return [seedId];
+  const midY = b.y + b.height / 2;
+  const out: string[] = [];
+  for (const n of doc.nodes) {
+    if (n.kind !== 'mosaicRect' && n.kind !== 'mosaicStroke') continue;
+    const r = mosaicNodeBounds(n);
+    if (!r || r.height <= 0) continue;
+    if (midY >= r.y - 1e-6 && midY <= r.y + r.height + 1e-6) out.push(n.id);
+  }
+  return out;
+}
+
+/** Same column: vertical midline of seed passes through the mosaic's horizontal span. */
+function collectSameColumnMosaicIds(doc: EditorDocument, seedId: string): string[] {
+  const seed = doc.nodes.find((n) => n.id === seedId);
+  if (!seed || (seed.kind !== 'mosaicRect' && seed.kind !== 'mosaicStroke')) return [];
+  const b = mosaicNodeBounds(seed);
+  if (!b || b.width <= 0) return [seedId];
+  const midX = b.x + b.width / 2;
+  const out: string[] = [];
+  for (const n of doc.nodes) {
+    if (n.kind !== 'mosaicRect' && n.kind !== 'mosaicStroke') continue;
+    const r = mosaicNodeBounds(n);
+    if (!r || r.width <= 0) continue;
+    if (midX >= r.x - 1e-6 && midX <= r.x + r.width + 1e-6) out.push(n.id);
+  }
+  return out;
+}
+
+function sortMosaicIdsByRowThenCol(doc: EditorDocument, ids: readonly string[]): string[] {
+  return [...ids].sort((a, b) => {
+    const na = doc.nodes.find((n) => n.id === a);
+    const nb = doc.nodes.find((n) => n.id === b);
+    const ba = na ? mosaicNodeBounds(na) : null;
+    const bb = nb ? mosaicNodeBounds(nb) : null;
+    const ya = ba ? ba.y + ba.height / 2 : 0;
+    const yb = bb ? bb.y + bb.height / 2 : 0;
+    if (Math.abs(ya - yb) > 1e-3) return ya - yb;
+    const xa = ba ? ba.x + ba.width / 2 : 0;
+    const xb = bb ? bb.x + bb.width / 2 : 0;
+    return xa - xb;
+  });
+}
+
+function unionMosaicBounds(
+  doc: EditorDocument,
+  ids: readonly string[]
+): { x: number; y: number; width: number; height: number } | null {
+  if (ids.length === 0) return null;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const id of ids) {
+    const n = doc.nodes.find((nn) => nn.id === id);
+    if (!n || (n.kind !== 'mosaicRect' && n.kind !== 'mosaicStroke')) continue;
+    const b = mosaicNodeBounds(n);
+    if (!b || b.width <= 0 || b.height <= 0) continue;
+    minX = Math.min(minX, b.x);
+    minY = Math.min(minY, b.y);
+    maxX = Math.max(maxX, b.x + b.width);
+    maxY = Math.max(maxY, b.y + b.height);
+  }
+  if (!Number.isFinite(minX)) return null;
+  return { x: minX, y: minY, width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY) };
+}
+
+function sortMosaicIdsByColThenRow(doc: EditorDocument, ids: readonly string[]): string[] {
+  return [...ids].sort((a, b) => {
+    const na = doc.nodes.find((n) => n.id === a);
+    const nb = doc.nodes.find((n) => n.id === b);
+    const ba = na ? mosaicNodeBounds(na) : null;
+    const bb = nb ? mosaicNodeBounds(nb) : null;
+    const xa = ba ? ba.x + ba.width / 2 : 0;
+    const xb = bb ? bb.x + bb.width / 2 : 0;
+    if (Math.abs(xa - xb) > 1e-3) return xa - xb;
+    const ya = ba ? ba.y + ba.height / 2 : 0;
+    const yb = bb ? bb.y + bb.height / 2 : 0;
+    return ya - yb;
+  });
+}
+
 // NOTE:
 // For rectangle/auto-detect mosaics we want "stacking override":
 // later mosaics should visually cover earlier ones in the overlapped region,
@@ -304,15 +491,21 @@ function lockNodesUnderRegion(
             const pad = Math.max(n.strokeWidth, n.pointerLength, n.pointerWidth) + 4;
             return { x: minX - pad, y: minY - pad, width: maxX - minX + pad * 2, height: maxY - minY + pad * 2 };
           })()
-        : (() => {
-            const w = n.mode === 'area' && n.width ? n.width : 320;
-            const h = Math.max(24, (n.fontSize ?? 24) * 1.4);
-            return { x: n.x, y: n.y, width: w, height: h };
-          })();
+        : textBoundsApprox(n);
     if (!rectsOverlap(bounds, region)) continue;
     next = updateNode(next, n.id, { layer: 'base', locked: true } as any);
   }
   return next;
+}
+
+function arrowKonvaShadowProps(shadow?: boolean) {
+  return {
+    shadowEnabled: !!shadow,
+    shadowColor: 'rgba(0,0,0,0.75)',
+    shadowBlur: 6,
+    shadowOffset: { x: 2, y: 2 },
+    shadowOpacity: 0.5
+  };
 }
 
 function arrowDisplayPoints(node: ArrowNode): { points: number[]; tension: number } {
@@ -344,9 +537,171 @@ function arrowDisplayPoints(node: ArrowNode): { points: number[]; tension: numbe
   return { points: [a.x, a.y, ctrl.x, ctrl.y, b.x, b.y], tension: 0.5 };
 }
 
+function distPointToSegmentSquared(
+  px: number,
+  py: number,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number
+): number {
+  const vx = x2 - x1;
+  const vy = y2 - y1;
+  const wx = px - x1;
+  const wy = py - y1;
+  const c1 = vx * wx + vy * wy;
+  if (c1 <= 0) return (px - x1) ** 2 + (py - y1) ** 2;
+  const c2 = vx * vx + vy * vy;
+  if (c2 <= c1) return (px - x2) ** 2 + (py - y2) ** 2;
+  const t = c1 / c2;
+  const projx = x1 + t * vx;
+  const projy = y1 + t * vy;
+  return (px - projx) ** 2 + (py - projy) ** 2;
+}
+
+/** Top-first pick in document space (later updatedAt = on top). */
+function pickTopMosaicAtDocPos(doc: EditorDocument, docPos: { x: number; y: number }): string | null {
+  const nodes = doc.nodes.filter(
+    (n): n is MosaicRectNode | MosaicStrokeNode => n.kind === 'mosaicRect' || n.kind === 'mosaicStroke'
+  );
+  const sorted = nodes.slice().sort((a, b) => {
+    if (a.updatedAt !== b.updatedAt) return a.updatedAt - b.updatedAt;
+    if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+    return a.id.localeCompare(b.id);
+  });
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    const n = sorted[i]!;
+    if ((n as any).locked) continue;
+    if (n.kind === 'mosaicRect') {
+      const b = mosaicNodeBounds(n);
+      if (
+        b &&
+        docPos.x >= b.x &&
+        docPos.x <= b.x + b.width &&
+        docPos.y >= b.y &&
+        docPos.y <= b.y + b.height
+      ) {
+        return n.id;
+      }
+      continue;
+    }
+    const hitW = Math.max(20, n.brushSize + 8);
+    const thr = (hitW / 2) ** 2;
+    const pts = n.points;
+    if (pts.length === 1) {
+      const p = pts[0]!;
+      if ((docPos.x - p.x) ** 2 + (docPos.y - p.y) ** 2 <= thr) return n.id;
+      continue;
+    }
+    for (let j = 0; j + 1 < pts.length; j++) {
+      const p0 = pts[j]!;
+      const p1 = pts[j + 1]!;
+      if (distPointToSegmentSquared(docPos.x, docPos.y, p0.x, p0.y, p1.x, p1.y) <= thr) return n.id;
+    }
+  }
+  return null;
+}
+
+function pickMosaicIdFromStageHit(
+  stage: Konva.Stage,
+  pos: { x: number; y: number },
+  doc: EditorDocument
+): string | null {
+  const hit = stage.getIntersection(pos);
+  let walk: Konva.Node | null = hit;
+  while (walk && walk !== stage) {
+    if (walk.name() === 'mosaic_multi_drag_box') return null;
+    const id = walk.id();
+    if (id) {
+      const node = doc.nodes.find((n) => n.id === id);
+      if (node && (node.kind === 'mosaicRect' || node.kind === 'mosaicStroke')) return id;
+    }
+    walk = walk.getParent();
+  }
+  return null;
+}
+
+/** Stage hit for arrow/text nodes; `'transformer'` when the transformer handle was hit. */
+function pickArrowOrTextIdFromStageHit(
+  stage: Konva.Stage,
+  pos: { x: number; y: number },
+  present: EditorDocument
+): 'transformer' | string | null {
+  const topHit = stage.getIntersection(pos);
+  let walk: Konva.Node | null = topHit;
+  while (walk) {
+    if (walk.getClassName() === 'Transformer') return 'transformer';
+    walk = walk.getParent();
+  }
+  walk = topHit;
+  while (walk) {
+    const cn = walk.getClassName?.();
+    if ((cn === 'Arrow' || cn === 'Text') && walk.id()) {
+      const nid = walk.id();
+      if (present.nodes.some((n) => n.id === nid)) return nid;
+    }
+    walk = walk.getParent();
+  }
+  return null;
+}
+
+/** Top-first pick in document space (matches hitStrokeWidth-style tolerance). */
+function pickTopArrowOrTextAtDocPos(doc: EditorDocument, docPos: { x: number; y: number }): string | null {
+  for (let i = doc.nodes.length - 1; i >= 0; i--) {
+    const n = doc.nodes[i]!;
+    if ((n as any).locked) continue;
+    if (n.kind === 'text') {
+      const b = textBoundsApprox(n);
+      const pad = 6;
+      if (
+        docPos.x >= b.x - pad &&
+        docPos.x <= b.x + b.width + pad &&
+        docPos.y >= b.y - pad &&
+        docPos.y <= b.y + b.height + pad
+      ) {
+        return n.id;
+      }
+    }
+    if (n.kind === 'arrow') {
+      const hitW = Math.max(24, n.strokeWidth * 3);
+      const thr = (hitW / 2) ** 2;
+      const { points: flat } = arrowDisplayPoints(n);
+      for (let j = 0; j + 3 < flat.length; j += 2) {
+        const x1 = flat[j]!;
+        const y1 = flat[j + 1]!;
+        const x2 = flat[j + 2]!;
+        const y2 = flat[j + 3]!;
+        if (distPointToSegmentSquared(docPos.x, docPos.y, x1, y1, x2, y2) <= thr) return n.id;
+      }
+    }
+  }
+  return null;
+}
+
 function cloneDoc(doc: EditorDocument): EditorDocument {
   // structuredClone is available in modern browsers/electron renderer.
   return structuredClone(doc);
+}
+
+type MosaicCacheEntry = { img: HTMLImageElement; key: string };
+
+/** Prefer exact cache key; otherwise nearest numeric key for the same snapshot (smooth slider drags). */
+function pickNearestCachedMosaicImage(
+  want: number,
+  cache: Record<number, MosaicCacheEntry>,
+  baseKey: string
+): HTMLImageElement | null {
+  const direct = cache[want];
+  if (direct?.img && direct.key === baseKey) return direct.img;
+  let best: { img: HTMLImageElement; dist: number } | null = null;
+  for (const k of Object.keys(cache)) {
+    const n = Number(k);
+    const entry = cache[n];
+    if (!entry?.img || entry.key !== baseKey) continue;
+    const d = Math.abs(n - want);
+    if (!best || d < best.dist) best = { img: entry.img, dist: d };
+  }
+  return best?.img ?? null;
 }
 
 type AnnotationTemplateV1 = {
@@ -436,32 +791,79 @@ function snapshotFromDoc(doc: EditorDocument, bgOffset: { x: number; y: number }
   };
 }
 
-async function createPixelatedDataUrl(image: HTMLImageElement, pixelSize: number): Promise<string> {
-  const w = image.naturalWidth;
-  const h = image.naturalHeight;
+/** Sample average color per block from source pixels (WeChat-style mosaic). */
+function createPixelatedCanvas(
+  source: CanvasImageSource,
+  width: number,
+  height: number,
+  pixelSize: number
+): HTMLCanvasElement {
+  const w = Math.max(1, Math.round(width));
+  const h = Math.max(1, Math.round(height));
+  const ps = Math.max(1, Math.round(pixelSize));
 
-  const smallW = Math.max(1, Math.floor(w / pixelSize));
-  const smallH = Math.max(1, Math.floor(h / pixelSize));
-
-  const small = document.createElement('canvas');
-  small.width = smallW;
-  small.height = smallH;
-  const sctx = small.getContext('2d');
+  const sample = document.createElement('canvas');
+  sample.width = w;
+  sample.height = h;
+  const sctx = sample.getContext('2d', { willReadFrequently: true });
   if (!sctx) throw new Error('2d context not available');
-  sctx.imageSmoothingEnabled = true;
-  sctx.clearRect(0, 0, smallW, smallH);
-  sctx.drawImage(image, 0, 0, smallW, smallH);
+  sctx.clearRect(0, 0, w, h);
+  // @ts-expect-error drawImage accepts CanvasImageSource
+  sctx.drawImage(source, 0, 0, w, h);
+  const { data } = sctx.getImageData(0, 0, w, h);
 
   const out = document.createElement('canvas');
   out.width = w;
   out.height = h;
   const octx = out.getContext('2d');
   if (!octx) throw new Error('2d context not available');
-  octx.imageSmoothingEnabled = false;
-  octx.clearRect(0, 0, w, h);
-  octx.drawImage(small, 0, 0, smallW, smallH, 0, 0, w, h);
+  const outImage = octx.createImageData(w, h);
+  const outData = outImage.data;
 
-  return out.toDataURL('image/png');
+  for (let by = 0; by < h; by += ps) {
+    const bh = Math.min(ps, h - by);
+    for (let bx = 0; bx < w; bx += ps) {
+      const bw = Math.min(ps, w - bx);
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      let weight = 0;
+      for (let y = by; y < by + bh; y++) {
+        for (let x = bx; x < bx + bw; x++) {
+          const i = (y * w + x) * 4;
+          const a = data[i + 3]!;
+          if (a <= 0) continue;
+          const aw = a / 255;
+          r += data[i]! * aw;
+          g += data[i + 1]! * aw;
+          b += data[i + 2]! * aw;
+          weight += aw;
+        }
+      }
+      if (weight <= 0) continue;
+      const cr = Math.round(r / weight);
+      const cg = Math.round(g / weight);
+      const cb = Math.round(b / weight);
+      for (let y = by; y < by + bh; y++) {
+        for (let x = bx; x < bx + bw; x++) {
+          const i = (y * w + x) * 4;
+          outData[i] = cr;
+          outData[i + 1] = cg;
+          outData[i + 2] = cb;
+          outData[i + 3] = 255;
+        }
+      }
+    }
+  }
+
+  octx.putImageData(outImage, 0, 0);
+  return out;
+}
+
+async function createPixelatedDataUrl(image: HTMLImageElement, pixelSize: number): Promise<string> {
+  const w = image.naturalWidth || image.width;
+  const h = image.naturalHeight || image.height;
+  return createPixelatedCanvas(image, w, h, pixelSize).toDataURL('image/png');
 }
 
 async function createPixelatedDataUrlFromSource(
@@ -469,29 +871,7 @@ async function createPixelatedDataUrlFromSource(
   size: { width: number; height: number },
   pixelSize: number
 ): Promise<string> {
-  const w = size.width;
-  const h = size.height;
-  const smallW = Math.max(1, Math.floor(w / pixelSize));
-  const smallH = Math.max(1, Math.floor(h / pixelSize));
-  const small = document.createElement('canvas');
-  small.width = smallW;
-  small.height = smallH;
-  const sctx = small.getContext('2d');
-  if (!sctx) throw new Error('2d context not available');
-  sctx.imageSmoothingEnabled = true;
-  sctx.clearRect(0, 0, smallW, smallH);
-  // @ts-expect-error drawImage accepts CanvasImageSource
-  sctx.drawImage(source, 0, 0, smallW, smallH);
-
-  const out = document.createElement('canvas');
-  out.width = w;
-  out.height = h;
-  const octx = out.getContext('2d');
-  if (!octx) throw new Error('2d context not available');
-  octx.imageSmoothingEnabled = false;
-  octx.clearRect(0, 0, w, h);
-  octx.drawImage(small, 0, 0, smallW, smallH, 0, 0, w, h);
-  return out.toDataURL('image/png');
+  return createPixelatedCanvas(source, size.width, size.height, pixelSize).toDataURL('image/png');
 }
 
 async function createBlurredDataUrl(image: HTMLImageElement, radius: number): Promise<string> {
@@ -531,6 +911,36 @@ async function createBlurredDataUrlFromSource(
   return out.toDataURL('image/png');
 }
 
+function renderDocBackgroundCanvas(
+  bgImage: HTMLImageElement,
+  bgOffset: { x: number; y: number },
+  docW: number,
+  docH: number,
+  pixelRatio = 1
+): HTMLCanvasElement {
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(docW * pixelRatio));
+  canvas.height = Math.max(1, Math.round(docH * pixelRatio));
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return canvas;
+  ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+  ctx.drawImage(bgImage, bgOffset.x, bgOffset.y);
+  return canvas;
+}
+
+function normalizeCanvasToDocSize(canvas: HTMLCanvasElement, docW: number, docH: number): HTMLCanvasElement {
+  if (canvas.width === docW && canvas.height === docH) return canvas;
+  const out = document.createElement('canvas');
+  out.width = Math.max(1, Math.round(docW));
+  out.height = Math.max(1, Math.round(docH));
+  const ctx = out.getContext('2d');
+  if (!ctx) return canvas;
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(canvas, 0, 0, out.width, out.height);
+  return out;
+}
+
 export const EditorWidget = React.forwardRef<
   EditorWidgetHandle,
   {
@@ -542,15 +952,39 @@ export const EditorWidget = React.forwardRef<
   const stageRef = useRef<Konva.Stage | null>(null);
   const transformerRef = useRef<Konva.Transformer | null>(null);
   const baseGroupRef = useRef<Konva.Group | null>(null);
+  /** Selection highlights + auto-detect boxes — hidden when exporting annotation-only image. */
+  const annotationChromeGroupRef = useRef<Konva.Group | null>(null);
   const snapshotGroupRef = useRef<Konva.Group | null>(null);
   const spacePressedRef = useRef(false);
 
   const [tool, setTool] = useState<Tool>(props.options?.initialTool ?? { kind: 'select' });
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  /** Multi-select for mosaic rect/stroke only (Shift+click). Drag moves all selected together. */
+  const [selectedMosaicIds, setSelectedMosaicIds] = useState<string[]>([]);
+  const selectedMosaicSet = useMemo(() => new Set(selectedMosaicIds), [selectedMosaicIds]);
+  const mosaicGroupNodeRefs = useRef<Map<string, Konva.Group>>(new Map());
+  const mosaicDragIdsRef = useRef<string[]>([]);
+  const mosaicDragLeaderRef = useRef<string | null>(null);
+  const mosaicGroupDragBoxOriginRef = useRef({ x: 0, y: 0 });
+  const suppressNextStageSelectionClearRef = useRef(false);
+  const selectedIdRef = useRef<string | null>(null);
+  const selectedMosaicIdsRef = useRef<string[]>([]);
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
+  useEffect(() => {
+    selectedMosaicIdsRef.current = selectedMosaicIds;
+  }, [selectedMosaicIds]);
   const [editingTextId, setEditingTextId] = useState<string | null>(null);
   const [editingTextDraft, setEditingTextDraft] = useState<string>('');
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const suppressNextTextCreateRef = useRef(false);
+  const ignoreTextBlurRef = useRef(false);
+  const suppressAnnotationClickRef = useRef(false);
+  const onSelectionChangeRef = useRef(props.options?.onSelectionChange);
+  onSelectionChangeRef.current = props.options?.onSelectionChange;
+  const onMosaicSelectionChangeRef = useRef(props.options?.onMosaicSelectionChange);
+  onMosaicSelectionChangeRef.current = props.options?.onMosaicSelectionChange;
   const [imageLoadError, setImageLoadError] = useState<string | null>(null);
 
   const [bgSrc, setBgSrc] = useState<string | null>(null);
@@ -569,11 +1003,16 @@ export const EditorWidget = React.forwardRef<
   const templateKey = props.options?.template?.key ? `screenshot_template_v1:${props.options.template.key}` : null;
   const templateAutoApply = props.options?.template?.autoApply ?? true;
   const templateAutoSave = props.options?.template?.autoSave ?? true;
+  const templateApplyMergeExistingRef = useRef((props.options?.template?.applyMode ?? 'merge') === 'merge');
+  useEffect(() => {
+    templateApplyMergeExistingRef.current = (props.options?.template?.applyMode ?? 'merge') === 'merge';
+  }, [props.options?.template?.applyMode]);
   const templateSaveTimerRef = useRef<number | null>(null);
 
-  function loadTemplate(): AnnotationTemplateV1 | null {
-    if (!templateKey) return null;
-    const raw = safeLocalStorageGet(templateKey);
+  function loadTemplate(storageKeyOverride?: string | null): AnnotationTemplateV1 | null {
+    const key = storageKeyOverride ?? templateKey;
+    if (!key) return null;
+    const raw = safeLocalStorageGet(key);
     if (!raw) return null;
     try {
       const parsed = JSON.parse(raw) as AnnotationTemplateV1;
@@ -608,18 +1047,25 @@ export const EditorWidget = React.forwardRef<
     props.options?.onTemplateEvent?.({ type: 'cleared', key: templateKey });
   }
 
-  function applyTemplateToDocument(doc: EditorDocument, tpl: AnnotationTemplateV1): EditorDocument {
+  function applyTemplateToDocument(
+    doc: EditorDocument,
+    tpl: AnnotationTemplateV1,
+    opts?: { mergeExisting?: boolean }
+  ): EditorDocument {
     const bw = tpl.base.width || 1;
     const bh = tpl.base.height || 1;
     const sx = doc.width / bw;
     const sy = doc.height / bh;
     const now = Date.now();
-    const nodes: EditorNode[] = tpl.nodes.map((n) => {
+    const newNodes: EditorNode[] = tpl.nodes.map((n) => {
       const scaled = applyTemplateScale(n as any, sx, sy) as any;
       const id = createLocalId(n.kind === 'text' ? 'text' : n.kind === 'arrow' ? 'arrow' : 'mosaic');
       return { ...scaled, id, createdAt: now, updatedAt: now } as EditorNode;
     });
-    return { ...doc, nodes };
+    if (opts?.mergeExisting) {
+      return { ...doc, nodes: [...doc.nodes, ...newNodes] };
+    }
+    return { ...doc, nodes: newNodes };
   }
 
   const [history, setHistory] = useState(() =>
@@ -634,11 +1080,87 @@ export const EditorWidget = React.forwardRef<
     x: number;
     y: number;
     nodeId: string;
-    kind: 'arrow' | 'text';
+    kind: 'arrow' | 'text' | 'mosaic';
   } | null>(null);
 
   type DetectedRegion = MosaicRectInput & { id: string; selected: boolean };
-  const [detectedRegions, setDetectedRegions] = useState<DetectedRegion[]>([]);
+  const [detectedRegions, setDetectedRegionsState] = useState<DetectedRegion[]>([]);
+  const detectedRegionsRef = useRef<DetectedRegion[]>([]);
+  useEffect(() => {
+    detectedRegionsRef.current = detectedRegions;
+  }, [detectedRegions]);
+
+  const [ocrRegionPickActive, setOcrRegionPickActive] = useState(false);
+  const [ocrRegionPickPreview, setOcrRegionPickPreview] = useState<MosaicRectInput | null>(null);
+  const ocrRegionPickActiveRef = useRef(false);
+  const ocrRegionPickDrawingRef = useRef(false);
+  const ocrRegionPickStartRef = useRef<{ x: number; y: number } | null>(null);
+  useEffect(() => {
+    ocrRegionPickActiveRef.current = ocrRegionPickActive;
+  }, [ocrRegionPickActive]);
+
+  useEffect(() => {
+    if (!ocrRegionPickActive) return;
+    const onWindowMouseUp = () => endOcrRegionPickDrag();
+    window.addEventListener('mouseup', onWindowMouseUp);
+    return () => window.removeEventListener('mouseup', onWindowMouseUp);
+  }, [ocrRegionPickActive]);
+
+  function resetOcrRegionPickState(notifyCancel = false) {
+    ocrRegionPickActiveRef.current = false;
+    ocrRegionPickDrawingRef.current = false;
+    ocrRegionPickStartRef.current = null;
+    setOcrRegionPickActive(false);
+    setOcrRegionPickPreview(null);
+    if (notifyCancel) props.options?.onOcrRegionPickCancelled?.();
+  }
+
+  function startOcrRegionPickDrag(docPos: { x: number; y: number }) {
+    finishTextEditing();
+    clearNodeSelection();
+    setActiveMosaicId(null);
+    isDrawingRef.current = false;
+    drawingNodeIdRef.current = null;
+    panStartRef.current = null;
+    ocrRegionPickDrawingRef.current = true;
+    ocrRegionPickStartRef.current = docPos;
+    setOcrRegionPickPreview({ x: docPos.x, y: docPos.y, width: 1, height: 1 });
+  }
+
+  function updateOcrRegionPickDrag() {
+    if (!ocrRegionPickDrawingRef.current) return;
+    const start = ocrRegionPickStartRef.current;
+    const docPos = getPointerInDocument();
+    if (!start || !docPos) return;
+    setOcrRegionPickPreview(normalizeRect(start, docPos));
+  }
+
+  function endOcrRegionPickDrag() {
+    if (!ocrRegionPickDrawingRef.current) return;
+    const start = ocrRegionPickStartRef.current;
+    const pos = getPointerInDocument();
+    ocrRegionPickDrawingRef.current = false;
+    ocrRegionPickStartRef.current = null;
+    if (!start || !pos) {
+      cancelOcrRegionPickInternal();
+      return;
+    }
+    finishOcrRegionPick(normalizeRect(start, pos));
+  }
+
+  function finishOcrRegionPick(region: MosaicRectInput | null) {
+    resetOcrRegionPickState(false);
+    if (region && region.width >= 8 && region.height >= 8) {
+      props.options?.onOcrRegionPicked?.(region);
+    } else {
+      props.options?.onOcrRegionPickCancelled?.();
+    }
+  }
+
+  function cancelOcrRegionPickInternal() {
+    resetOcrRegionPickState(true);
+  }
+
   // Currently drawn mosaic id, used only to render an extra overlay above arrows/texts for real-time cover.
   const [activeMosaicId, setActiveMosaicId] = useState<string | null>(null);
 
@@ -654,29 +1176,97 @@ export const EditorWidget = React.forwardRef<
   const [stagePosition, setStagePosition] = useState({ x: 0, y: 0 });
   const [stageSize, setStageSize] = useState({ width: 800, height: 600 });
 
-  // Background alignment (drag image under annotations).
+  // Background alignment: drag image under annotations (annotations stay fixed).
   const [bgOffsetDoc, setBgOffsetDoc] = useState({ x: 0, y: 0 });
   const [bgDragMode, setBgDragMode] = useState(false);
   const bgDragModeRef = useRef(false);
+  type BackgroundDragKind = false | 'align';
+  const bgDragKindRef = useRef<BackgroundDragKind>(false);
   const bgOffsetDocRef = useRef(bgOffsetDoc);
   const stageScaleRef = useRef(stageScale);
+  const stagePositionRef = useRef(stagePosition);
+  const stageTransformGroupRef = useRef<Konva.Group | null>(null);
   useEffect(() => {
     bgOffsetDocRef.current = bgOffsetDoc;
   }, [bgOffsetDoc]);
   useEffect(() => {
     stageScaleRef.current = stageScale;
   }, [stageScale]);
+  useEffect(() => {
+    stagePositionRef.current = stagePosition;
+  }, [stagePosition]);
+
+  /** Fit-to-view layout for current document size (not stale React state after crop). */
+  function getDocumentStageLayout(docW?: number, docH?: number): { scale: number; position: { x: number; y: number } } {
+    const doc = historyRef.current.present;
+    const w = docW ?? doc.width;
+    const h = docH ?? doc.height;
+    const stage = stageRef.current;
+    const sw = stage && stage.width() > 0 ? stage.width() : stageSize.width;
+    const sh = stage && stage.height() > 0 ? stage.height() : stageSize.height;
+    if (w <= 0 || h <= 0 || sw <= 0 || sh <= 0) {
+      return { scale: stageScaleRef.current, position: { ...stagePositionRef.current } };
+    }
+    const scale = Math.min(sw / w, sh / h, 1);
+    return {
+      scale,
+      position: { x: (sw - w * scale) / 2, y: (sh - h * scale) / 2 }
+    };
+  }
+
+  function applyStageLayoutForDocument(docW: number, docH: number) {
+    const layout = getDocumentStageLayout(docW, docH);
+    stageScaleRef.current = layout.scale;
+    stagePositionRef.current = layout.position;
+    stageTransformGroupRef.current?.position(layout.position);
+    stageTransformGroupRef.current?.scale({ x: layout.scale, y: layout.scale });
+    setStageScale(layout.scale);
+    setStagePosition(layout.position);
+    stageRef.current?.batchDraw();
+    return layout;
+  }
+
+  async function prepareStageForExport(): Promise<{ scale: number }> {
+    await ensureBgImageSynced();
+    const doc = historyRef.current.present;
+    const layout = applyStageLayoutForDocument(doc.width, doc.height);
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    });
+    return layout;
+  }
+
+  /** Map browser client coords → document coords (same space as crop box / annotations). */
+  function pointerInDocumentFromClient(clientX: number, clientY: number): { x: number; y: number } | null {
+    const stage = stageRef.current;
+    const group = baseGroupRef.current;
+    if (!stage || !group) return null;
+    const container = stage.container();
+    const rect = container.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    const sx = stage.width() / rect.width;
+    const sy = stage.height() / rect.height;
+    const stagePointer = {
+      x: (clientX - rect.left) * sx,
+      y: (clientY - rect.top) * sy
+    };
+    const transform = group.getAbsoluteTransform().copy().invert();
+    return transform.point(stagePointer);
+  }
 
   // Image-level transforms applied during export/display:
   // - crop: user drags a crop rectangle on the stage
   const [transformMode, setTransformModeState] = useState<'none' | 'crop'>('none');
-  const [cropRectDoc, setCropRectDoc] = useState<{
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-  } | null>(null);
-  const cropRectNodeRef = useRef<Konva.Rect | null>(null);
+  const [cropSelection, setCropSelection] = useState<CropSelection | null>(null);
+  const [cropOptions, setCropOptionsState] = useState<CropOptions>({ ...DEFAULT_CROP_OPTIONS });
+  const isCropDrawingRef = useRef(false);
+  const [cropDrawing, setCropDrawing] = useState(false);
+  const cropDrawStartRef = useRef<{ x: number; y: number } | null>(null);
+  const cropNodeRef = useRef<Konva.Rect | Konva.Ellipse | Konva.Line | null>(null);
+  const cropSelectionRef = useRef(cropSelection);
+  useEffect(() => {
+    cropSelectionRef.current = cropSelection;
+  }, [cropSelection]);
 
   const container = props.container;
 
@@ -694,33 +1284,52 @@ export const EditorWidget = React.forwardRef<
     return () => ro.disconnect();
   }, [container]);
 
-  // Align-mode drag with DOM listeners (not Konva bubbling), so annotations can't block dragging.
+  // Align drag with DOM listeners (not Konva bubbling), so annotations can't block dragging.
   useEffect(() => {
     if (!bgDragMode) return;
     const stageContainer = stageRef.current?.container();
     if (!stageContainer) return;
     let dragging = false;
-    let startClient = { x: 0, y: 0 };
+    let startDoc = { x: 0, y: 0 };
     let startOffset = { x: 0, y: 0 };
+    let lastDelta = { x: 0, y: 0 };
 
     const onPointerDown = (ev: PointerEvent) => {
       const target = ev.target as Node | null;
       if (!target || !stageContainer.contains(target)) return;
+      const doc = pointerInDocumentFromClient(ev.clientX, ev.clientY);
+      if (!doc) return;
       dragging = true;
-      startClient = { x: ev.clientX, y: ev.clientY };
+      startDoc = doc;
       startOffset = { ...bgOffsetDocRef.current };
+      lastDelta = { x: 0, y: 0 };
       ev.preventDefault();
     };
     const onPointerMove = (ev: PointerEvent) => {
       if (!dragging) return;
-      const scale = Math.max(0.0001, stageScaleRef.current);
-      const dx = (ev.clientX - startClient.x) / scale;
-      const dy = (ev.clientY - startClient.y) / scale;
-      setBgOffsetDoc({ x: startOffset.x + dx, y: startOffset.y + dy });
+      const doc = pointerInDocumentFromClient(ev.clientX, ev.clientY);
+      if (!doc) return;
+      const dx = doc.x - startDoc.x;
+      const dy = doc.y - startDoc.y;
+      lastDelta = { x: dx, y: dy };
+      setBgOffsetDoc({
+        x: startOffset.x + dx,
+        y: startOffset.y + dy
+      });
       ev.preventDefault();
     };
     const onPointerUp = () => {
+      if (dragging && bgDragKindRef.current === 'align') {
+        const { x: dx, y: dy } = lastDelta;
+        if (Math.abs(dx) >= 0.5 || Math.abs(dy) >= 0.5) {
+          commit(cloneDoc(historyRef.current.present));
+        } else {
+          setBgOffsetDoc(startOffset);
+          bgOffsetDocRef.current = startOffset;
+        }
+      }
       dragging = false;
+      lastDelta = { x: 0, y: 0 };
     };
 
     window.addEventListener('pointerdown', onPointerDown, true);
@@ -791,10 +1400,18 @@ export const EditorWidget = React.forwardRef<
   }, [history.present.nodes]);
 
   function toggleDetectedRegion(id: string) {
-    setDetectedRegions((prev) => prev.map((r) => (r.id === id ? { ...r, selected: !r.selected } : r)));
+    setDetectedRegionsState((prev) => {
+      const next = prev.map((r) => (r.id === id ? { ...r, selected: !r.selected } : r));
+      detectedRegionsRef.current = next;
+      return next;
+    });
   }
   function setAllDetectedRegionsSelected(selected: boolean) {
-    setDetectedRegions((prev) => prev.map((r) => ({ ...r, selected })));
+    setDetectedRegionsState((prev) => {
+      const next = prev.map((r) => ({ ...r, selected }));
+      detectedRegionsRef.current = next;
+      return next;
+    });
   }
   const arrows = useMemo(
     () => history.present.nodes.filter((n): n is ArrowNode => n.kind === 'arrow'),
@@ -868,7 +1485,7 @@ export const EditorWidget = React.forwardRef<
 
         // Per-image restore (highest priority).
         if (props.options?.initialAnnotations) {
-          doc = applyTemplateToDocument(doc, props.options.initialAnnotations as any);
+          doc = applyTemplateToDocument(doc, props.options.initialAnnotations as any, { mergeExisting: false });
           const off = (props.options.initialAnnotations as any).bgOffset;
           if (off && typeof off.x === 'number' && typeof off.y === 'number') {
             setBgOffsetDoc({ x: off.x, y: off.y });
@@ -882,7 +1499,7 @@ export const EditorWidget = React.forwardRef<
         // Auto-apply last template when opening a new image.
         if (templateAutoApply) {
           const tpl = loadTemplate();
-          if (tpl) doc = applyTemplateToDocument(doc, tpl);
+          if (tpl) doc = applyTemplateToDocument(doc, tpl, { mergeExisting: templateApplyMergeExistingRef.current });
         }
 
         // When restoring per-image annotations, keep at least one undo step:
@@ -892,7 +1509,8 @@ export const EditorWidget = React.forwardRef<
         } else {
           setHistory(createHistory(doc));
         }
-        setSelectedId(null);
+        clearNodeSelection();
+        setSelectedMosaicIds([]);
       }
     })().catch((err) => {
       if (cancelled) return;
@@ -902,12 +1520,17 @@ export const EditorWidget = React.forwardRef<
     return () => {
       cancelled = true;
     };
-  }, [bgSrc, templateAutoApply, templateKey]);
+  }, [bgSrc, templateAutoApply]);
+
+  const bgImageMatchesDoc =
+    !!bgImage &&
+    bgImage.naturalWidth === history.present.width &&
+    bgImage.naturalHeight === history.present.height;
 
   // Build a "base snapshot" canvas in DOCUMENT coordinates (no stage pan/zoom):
   // background only. Arrow/text are always rendered as top layer.
   useEffect(() => {
-    if (!bgImage) return;
+    if (!bgImage || !bgImageMatchesDoc) return;
     const g = snapshotGroupRef.current ?? null;
     if (!g) return;
     // Konva will not render invisible nodes into toCanvas(), so we temporarily toggle visibility
@@ -922,6 +1545,7 @@ export const EditorWidget = React.forwardRef<
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     bgImage,
+    bgImageMatchesDoc,
     history.present.width,
     history.present.height,
     bgOffsetDoc.x,
@@ -931,10 +1555,11 @@ export const EditorWidget = React.forwardRef<
   // IMPORTANT:
   // Mosaic caches must be invalidated whenever the background snapshot changes.
   const baseSnapshotKey = useMemo(() => {
+    const imgKey = bgImage ? `${bgImage.naturalWidth}x${bgImage.naturalHeight}` : '0x0';
     // Only force-invalidate caches on explicit undo/redo, not on every history push,
     // otherwise mosaics can look like they "don't apply" while caches rebuild.
-    return `${bgSrc ?? ''}|${history.present.width}x${history.present.height}|off:${bgOffsetDoc.x},${bgOffsetDoc.y}|${undoRedoKey}|${snapshotVersion}`;
-  }, [bgSrc, history.present.width, history.present.height, bgOffsetDoc.x, bgOffsetDoc.y, undoRedoKey, snapshotVersion]);
+    return `${bgSrc ?? ''}|doc:${history.present.width}x${history.present.height}|img:${imgKey}|off:${bgOffsetDoc.x},${bgOffsetDoc.y}|${undoRedoKey}|${snapshotVersion}|px:v2`;
+  }, [bgSrc, bgImage, history.present.width, history.present.height, bgOffsetDoc.x, bgOffsetDoc.y, undoRedoKey, snapshotVersion]);
 
   useEffect(() => {
     // Do not hard-clear caches on snapshot change; that would cause existing mosaics
@@ -958,22 +1583,26 @@ export const EditorWidget = React.forwardRef<
 
   useEffect(() => {
     if (!bgImage) return;
+    const docSize = { width: history.present.width, height: history.present.height };
+    const imgW = bgImage.naturalWidth || bgImage.width || 0;
+    const imgH = bgImage.naturalHeight || bgImage.height || 0;
+    const sizesMatch = imgW === docSize.width && imgH === docSize.height;
     const canUseBaseCanvas =
       !!baseCanvas &&
       baseCanvasBgSrc === (bgSrc ?? null) &&
       !!baseCanvasOffset &&
       baseCanvasOffset.x === bgOffsetDoc.x &&
       baseCanvasOffset.y === bgOffsetDoc.y;
-    const source = canUseBaseCanvas ? (baseCanvas as HTMLCanvasElement) : bgImage;
-    const docSize = { width: history.present.width, height: history.present.height };
+    const source: HTMLImageElement | HTMLCanvasElement =
+      canUseBaseCanvas ? (baseCanvas as HTMLCanvasElement) : sizesMatch ? bgImage : renderDocBackgroundCanvas(bgImage, bgOffsetDoc, docSize.width, docSize.height, 1);
     let cancelled = false;
     (async () => {
       const next: Record<number, CachedImg> = { ...pixelCache };
       for (const px of pixelSizesNeeded) {
         if (next[px]?.key === baseSnapshotKey) continue;
         const dataUrl =
-          source === bgImage
-            ? await createPixelatedDataUrl(bgImage, px)
+          source instanceof HTMLImageElement
+            ? await createPixelatedDataUrl(source, px)
             : await createPixelatedDataUrlFromSource(source, docSize, px);
         if (cancelled) return;
         const img = await loadHtmlImage(dataUrl);
@@ -1001,24 +1630,36 @@ export const EditorWidget = React.forwardRef<
 
   const [blurCache, setBlurCache] = useState<Record<number, CachedImg>>({});
 
+  function invalidateMosaicCaches() {
+    setPixelCache({});
+    setBlurCache({});
+    setBaseCanvas(null);
+    setBaseCanvasBgSrc(null);
+    setBaseCanvasOffset(null);
+  }
+
   useEffect(() => {
     if (!bgImage) return;
+    const docSize = { width: history.present.width, height: history.present.height };
+    const imgW = bgImage.naturalWidth || bgImage.width || 0;
+    const imgH = bgImage.naturalHeight || bgImage.height || 0;
+    const sizesMatch = imgW === docSize.width && imgH === docSize.height;
     const canUseBaseCanvas =
       !!baseCanvas &&
       baseCanvasBgSrc === (bgSrc ?? null) &&
       !!baseCanvasOffset &&
       baseCanvasOffset.x === bgOffsetDoc.x &&
       baseCanvasOffset.y === bgOffsetDoc.y;
-    const source = canUseBaseCanvas ? (baseCanvas as HTMLCanvasElement) : bgImage;
-    const docSize = { width: history.present.width, height: history.present.height };
+    const source: HTMLImageElement | HTMLCanvasElement =
+      canUseBaseCanvas ? (baseCanvas as HTMLCanvasElement) : sizesMatch ? bgImage : renderDocBackgroundCanvas(bgImage, bgOffsetDoc, docSize.width, docSize.height, 1);
     let cancelled = false;
     (async () => {
       const next: Record<number, CachedImg> = { ...blurCache };
       for (const radius of blurRadiiNeeded) {
         if (next[radius]?.key === baseSnapshotKey) continue;
         const dataUrl =
-          source === bgImage
-            ? await createBlurredDataUrl(bgImage, radius)
+          source instanceof HTMLImageElement
+            ? await createBlurredDataUrl(source, radius)
             : await createBlurredDataUrlFromSource(source, docSize, radius);
         if (cancelled) return;
         const img = await loadHtmlImage(dataUrl);
@@ -1039,9 +1680,11 @@ export const EditorWidget = React.forwardRef<
     if (!transformer || !stage) return;
 
     if (transformMode === 'crop') {
-      if (cropRectNodeRef.current && cropRectDoc) {
-        transformer.nodes([cropRectNodeRef.current as unknown as Konva.Node]);
+      if (cropNodeRef.current && cropSelection && cropSelection.shape !== 'freehand' && !cropDrawing) {
+        transformer.keepRatio(cropSelection.shape === 'circle');
+        transformer.nodes([cropNodeRef.current as unknown as Konva.Node]);
       } else {
+        transformer.keepRatio(false);
         transformer.nodes([]);
       }
       transformer.getLayer()?.batchDraw();
@@ -1061,6 +1704,17 @@ export const EditorWidget = React.forwardRef<
     const selectedNode = history.present.nodes.find((n) => n.id === selectedId) ?? null;
     if (selectedNode && (selectedNode.kind === 'mosaicRect' || selectedNode.kind === 'mosaicStroke')) {
       // Mosaic uses custom "box highlight" instead of transformer handles.
+      transformer.resizeEnabled(true);
+      transformer.enabledAnchors([
+        'top-left',
+        'top-center',
+        'top-right',
+        'middle-left',
+        'middle-right',
+        'bottom-left',
+        'bottom-center',
+        'bottom-right'
+      ]);
       transformer.nodes([]);
       transformer.getLayer()?.batchDraw();
       return;
@@ -1071,12 +1725,51 @@ export const EditorWidget = React.forwardRef<
       transformer.getLayer()?.batchDraw();
       return;
     }
+    if (selectedNode?.kind === 'arrow') {
+      // Allow endpoint stretching, but keep arrow visual style controlled by tool params
+      // (stroke/pointer size are not scaled in onTransformEnd).
+      transformer.resizeEnabled(true);
+      transformer.enabledAnchors([
+        'top-left',
+        'top-center',
+        'top-right',
+        'middle-left',
+        'middle-right',
+        'bottom-left',
+        'bottom-center',
+        'bottom-right'
+      ]);
+      transformer.nodes([node as unknown as Konva.Node]);
+      transformer.getLayer()?.batchDraw();
+      return;
+    }
+    transformer.resizeEnabled(true);
+    transformer.enabledAnchors([
+      'top-left',
+      'top-center',
+      'top-right',
+      'middle-left',
+      'middle-right',
+      'bottom-left',
+      'bottom-center',
+      'bottom-right'
+    ]);
     transformer.nodes([node as unknown as Konva.Node]);
     transformer.getLayer()?.batchDraw();
-  }, [selectedId, history.present.nodes, editingTextId, transformMode, cropRectDoc]);
+  }, [selectedId, history.present.nodes, editingTextId, transformMode, cropSelection, cropDrawing]);
 
   useEffect(() => {
-    const cb = props.options?.onSelectionChange;
+    if (!editingTextId) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t?.closest('.captureBar')) ignoreTextBlurRef.current = true;
+    };
+    document.addEventListener('mousedown', onDown, true);
+    return () => document.removeEventListener('mousedown', onDown, true);
+  }, [editingTextId]);
+
+  useEffect(() => {
+    const cb = onSelectionChangeRef.current;
     if (!cb) return;
     if (!selectedId) {
       cb(null);
@@ -1096,6 +1789,8 @@ export const EditorWidget = React.forwardRef<
           fontSize: node.fontSize,
           fontFamily: node.fontFamily,
           fontWeight: node.fontWeight,
+          fontItalic: node.fontItalic,
+          underline: node.underline,
           align: node.align,
           lineHeight: node.lineHeight,
           letterSpacing: node.letterSpacing
@@ -1111,13 +1806,32 @@ export const EditorWidget = React.forwardRef<
           arrowKind: node.arrowKind,
           stroke: node.stroke,
           strokeWidth: node.strokeWidth,
-          pointerSize: Math.max(node.pointerLength, node.pointerWidth)
+          pointerSize: Math.max(node.pointerLength, node.pointerWidth),
+          opacity: node.opacity ?? 1,
+          shadow: !!node.shadow
         }
       });
       return;
     }
     cb(null);
-  }, [history.present.nodes, props.options, selectedId]);
+  }, [history.present.nodes, selectedId]);
+
+  useEffect(() => {
+    const cb = onMosaicSelectionChangeRef.current;
+    if (!cb) return;
+    if (selectedMosaicIds.length > 0) {
+      cb({ ids: selectedMosaicIds, primaryId: selectedId });
+      return;
+    }
+    if (selectedId) {
+      const node = history.present.nodes.find((n) => n.id === selectedId) ?? null;
+      if (node && (node.kind === 'mosaicRect' || node.kind === 'mosaicStroke')) {
+        cb({ ids: [selectedId], primaryId: selectedId });
+        return;
+      }
+    }
+    cb(null);
+  }, [history.present.nodes, selectedId, selectedMosaicIds]);
 
   function commit(nextDoc: EditorDocument) {
     setHistory((h) => pushHistory(h, cloneDoc(nextDoc)));
@@ -1136,16 +1850,258 @@ export const EditorWidget = React.forwardRef<
     return { past, present: previous, future: [] };
   }
 
+  function clearNodeSelection() {
+    setSelectedId(null);
+    setSelectedMosaicIds([]);
+  }
+
+  function removeSelectedMosaics() {
+    const ids =
+      selectedMosaicIdsRef.current.length > 0
+        ? [...selectedMosaicIdsRef.current]
+        : (() => {
+            const sid = selectedIdRef.current;
+            if (!sid) return [] as string[];
+            const n = historyRef.current.present.nodes.find((nn) => nn.id === sid);
+            return n && (n.kind === 'mosaicRect' || n.kind === 'mosaicStroke') ? [sid] : [];
+          })();
+    if (ids.length === 0) return { ok: false as const, count: 0 };
+    commit(removeNodesByIds(historyRef.current.present, new Set(ids)));
+    clearNodeSelection();
+    setContextMenu(null);
+    return { ok: true as const, count: ids.length };
+  }
+
   function deleteNodeById(id: string) {
     setHistory((h) => pushHistory(h, removeNode(h.present, id)));
-    if (selectedId === id) setSelectedId(null);
+    setSelectedMosaicIds((prev) => {
+      const next = prev.filter((x) => x !== id);
+      queueMicrotask(() =>
+        setSelectedId((sid) => (sid === id ? (next.length ? next[next.length - 1]! : null) : sid))
+      );
+      return next;
+    });
     if (editingTextId === id) setEditingTextId(null);
     setContextMenu(null);
   }
 
+  /** Shift+click toggles; plain click on unselected replaces; re-clicking selected keeps multi-select. */
+  function onSelectMosaicNode(mosaicId: string, shiftKey: boolean) {
+    const node = history.present.nodes.find((nn) => nn.id === mosaicId) ?? null;
+    if (!node || (node.kind !== 'mosaicRect' && node.kind !== 'mosaicStroke')) return;
+    if ((node as any).locked) {
+      clearNodeSelection();
+      return;
+    }
+    if (shiftKey) {
+      setSelectedMosaicIds((prev) => {
+        const i = prev.indexOf(mosaicId);
+        const next = i >= 0 ? prev.filter((x) => x !== mosaicId) : [...prev, mosaicId];
+        const primary = next.length === 0 ? null : i >= 0 ? next[next.length - 1]! : mosaicId;
+        queueMicrotask(() => setSelectedId(primary));
+        return next;
+      });
+      return;
+    }
+    setSelectedMosaicIds((prev) => {
+      if (prev.includes(mosaicId)) {
+        queueMicrotask(() => setSelectedId(mosaicId));
+        return prev;
+      }
+      queueMicrotask(() => setSelectedId(mosaicId));
+      return [mosaicId];
+    });
+  }
+
+  function pointerPositionFromClient(stage: Konva.Stage, clientX: number, clientY: number): { x: number; y: number } | null {
+    const container = stage.container();
+    if (!container) return null;
+    const rect = container.getBoundingClientRect();
+    return { x: clientX - rect.left, y: clientY - rect.top };
+  }
+
+  function documentPositionFromStagePointer(pos: { x: number; y: number }) {
+    return {
+      x: (pos.x - stagePosition.x) / stageScale,
+      y: (pos.y - stagePosition.y) / stageScale
+    };
+  }
+
+  function isPointerOnAnnotationStagePos(stage: Konva.Stage, pos: { x: number; y: number }): boolean {
+    const doc = historyRef.current.present;
+    if (pickMosaicIdFromStageHit(stage, pos, doc)) return true;
+    const docPos = documentPositionFromStagePointer(pos);
+    if (pickTopMosaicAtDocPos(doc, docPos)) return true;
+    const hit = stage.getIntersection(pos);
+    let walk: Konva.Node | null = hit;
+    while (walk && walk !== stage) {
+      if (walk.name() === 'mosaic_multi_drag_box') return true;
+      const cn = walk.getClassName?.();
+      if (cn === 'Transformer') return true;
+      const id = walk.id();
+      if (id) {
+        const node = doc.nodes.find((n) => n.id === id);
+        if (
+          node?.kind === 'arrow' ||
+          node?.kind === 'text' ||
+          node?.kind === 'mosaicRect' ||
+          node?.kind === 'mosaicStroke'
+        ) {
+          return true;
+        }
+      }
+      walk = walk.getParent();
+    }
+    return false;
+  }
+
+  function shouldClearSelectionOnStageClick(stage: Konva.Stage): boolean {
+    const pos = stage.getPointerPosition();
+    if (!pos) return true;
+    return !isPointerOnAnnotationStagePos(stage, pos);
+  }
+
+  function isPointerOnAnnotationAtClient(stage: Konva.Stage, clientX: number, clientY: number): boolean {
+    const pos = pointerPositionFromClient(stage, clientX, clientY);
+    if (!pos) return false;
+    return isPointerOnAnnotationStagePos(stage, pos);
+  }
+
+  function moveMosaicNodesInDoc(doc: EditorDocument, ids: readonly string[], dx: number, dy: number): EditorDocument {
+    if (ids.length === 0 || (Math.abs(dx) < 0.01 && Math.abs(dy) < 0.01)) return doc;
+    let next = doc;
+    for (const id of ids) {
+      const node = next.nodes.find((nn) => nn.id === id) ?? null;
+      if (!node) continue;
+      if (node.kind === 'mosaicRect') {
+        next = updateNode(next, id, { x: node.x + dx, y: node.y + dy });
+      } else if (node.kind === 'mosaicStroke') {
+        next = updateNode(next, id, {
+          points: node.points.map((p) => ({ x: p.x + dx, y: p.y + dy }))
+        });
+      }
+    }
+    return next;
+  }
+
+  function mosaicDragSelectionFor(mosaicId: string): string[] {
+    const ids = selectedMosaicIdsRef.current;
+    if (ids.length > 0 && ids.includes(mosaicId)) return [...ids];
+    return [mosaicId];
+  }
+
+  function applyMosaicDragDelta(dx: number, dy: number) {
+    for (const oid of mosaicDragIdsRef.current) {
+      mosaicGroupNodeRefs.current.get(oid)?.position({ x: dx, y: dy });
+    }
+  }
+
+  function resetMosaicGroupDragPositions() {
+    for (const oid of mosaicDragIdsRef.current) {
+      mosaicGroupNodeRefs.current.get(oid)?.position({ x: 0, y: 0 });
+    }
+  }
+
+  function handleMosaicDragStart(mosaicId: string) {
+    mosaicDragIdsRef.current = mosaicDragSelectionFor(mosaicId);
+    mosaicDragLeaderRef.current = mosaicId;
+  }
+
+  function handleMosaicDragMove(mosaicId: string, ev: Konva.KonvaEventObject<DragEvent>) {
+    if (mosaicDragLeaderRef.current !== mosaicId) return;
+    const g = ev.target as unknown as Konva.Group;
+    const dx = g.x();
+    const dy = g.y();
+    for (const oid of mosaicDragIdsRef.current) {
+      if (oid === mosaicId) continue;
+      mosaicGroupNodeRefs.current.get(oid)?.position({ x: dx, y: dy });
+    }
+  }
+
+  function handleMosaicDragEnd(mosaicId: string, ev: Konva.KonvaEventObject<DragEvent>) {
+    const g = ev.target as unknown as Konva.Group;
+    const dx = g.x();
+    const dy = g.y();
+    g.position({ x: 0, y: 0 });
+    const ids = mosaicDragIdsRef.current.length > 0 ? [...mosaicDragIdsRef.current] : [mosaicId];
+    resetMosaicGroupDragPositions();
+    mosaicDragIdsRef.current = [];
+    mosaicDragLeaderRef.current = null;
+    if (Math.abs(dx) >= 0.01 || Math.abs(dy) >= 0.01) suppressNextStageSelectionClearRef.current = true;
+    if (Math.abs(dx) < 0.01 && Math.abs(dy) < 0.01) return;
+    commit(moveMosaicNodesInDoc(historyRef.current.present, ids, dx, dy));
+  }
+
+  function handleMosaicGroupDragStart(boxX: number, boxY: number) {
+    mosaicDragIdsRef.current = [...selectedMosaicIdsRef.current];
+    mosaicDragLeaderRef.current = '__group__';
+    mosaicGroupDragBoxOriginRef.current = { x: boxX, y: boxY };
+  }
+
+  function handleMosaicGroupDragMove(ev: Konva.KonvaEventObject<DragEvent>) {
+    if (mosaicDragLeaderRef.current !== '__group__') return;
+    const rect = ev.target as unknown as Konva.Rect;
+    const dx = rect.x() - mosaicGroupDragBoxOriginRef.current.x;
+    const dy = rect.y() - mosaicGroupDragBoxOriginRef.current.y;
+    applyMosaicDragDelta(dx, dy);
+  }
+
+  function handleMosaicGroupDragEnd(ev: Konva.KonvaEventObject<DragEvent>) {
+    if (mosaicDragLeaderRef.current !== '__group__') return;
+    const rect = ev.target as unknown as Konva.Rect;
+    const dx = rect.x() - mosaicGroupDragBoxOriginRef.current.x;
+    const dy = rect.y() - mosaicGroupDragBoxOriginRef.current.y;
+    rect.position({
+      x: mosaicGroupDragBoxOriginRef.current.x,
+      y: mosaicGroupDragBoxOriginRef.current.y
+    });
+    const ids = [...mosaicDragIdsRef.current];
+    resetMosaicGroupDragPositions();
+    mosaicDragIdsRef.current = [];
+    mosaicDragLeaderRef.current = null;
+    if (Math.abs(dx) >= 0.01 || Math.abs(dy) >= 0.01) suppressNextStageSelectionClearRef.current = true;
+    if (Math.abs(dx) < 0.01 && Math.abs(dy) < 0.01) return;
+    commit(moveMosaicNodesInDoc(historyRef.current.present, ids, dx, dy));
+  }
+
+  function markSuppressStageSelectionClear() {
+    suppressNextStageSelectionClearRef.current = true;
+  }
+
   function finishTextEditing() {
     if (!editingTextId) return;
-    commit(updateNode(history.present, editingTextId, { text: editingTextDraft }));
+    const id = editingTextId;
+    const draft = editingTextDraft;
+    const node = historyRef.current.present.nodes.find((n): n is TextNode => n.kind === 'text' && n.id === id);
+    let doc = historyRef.current.present;
+    if (node) {
+      const measured = measureTextBlock(
+        draft,
+        node.fontSize,
+        node.fontFamily,
+        (node.padding ?? 0) + TEXT_RENDER_PADDING,
+        node.lineHeight ?? 1.25,
+        node.fontWeight,
+        node.fontItalic
+      );
+      doc = {
+        ...doc,
+        nodes: doc.nodes.map((n) => {
+          if (n.id !== id || n.kind !== 'text') return n;
+          const { width: _w, mode: _m, ...rest } = n;
+          return {
+            ...rest,
+            text: draft,
+            mode: 'singleLine' as const,
+            width: measured.width,
+            updatedAt: Date.now()
+          };
+        })
+      };
+    } else {
+      doc = updateNode(doc, id, { text: draft, mode: 'singleLine' });
+    }
+    commit(doc);
     setEditingTextId(null);
     setTool({ kind: 'select' });
   }
@@ -1157,12 +2113,19 @@ export const EditorWidget = React.forwardRef<
   }
 
   function getPointerInDocument() {
+    const group = baseGroupRef.current;
+    if (group) {
+      const rel = group.getRelativePointerPosition();
+      if (rel) return rel;
+    }
+    const stage = stageRef.current;
     const p = getPointer();
-    if (!p) return null;
-    return {
-      x: (p.x - stagePosition.x) / stageScale,
-      y: (p.y - stagePosition.y) / stageScale
-    };
+    if (!stage || !p) return null;
+    const rect = stage.container().getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    const sx = stage.width() / rect.width;
+    const sy = stage.height() / rect.height;
+    return pointerInDocumentFromClient(rect.left + p.x / sx, rect.top + p.y / sy);
   }
 
   function getTextBoundsFromStageInDoc(id: string, fallback: TextNode): { x: number; y: number; width: number; height: number } {
@@ -1201,7 +2164,10 @@ export const EditorWidget = React.forwardRef<
       y: (visualRect.y - stagePosition.y) / stageScale
     };
 
-    if (absX !== 1) patch.width = Math.max(40, baseWidthNow * absX);
+    if (absX !== 1) {
+      patch.mode = 'singleLine';
+      patch.width = Math.max(40, baseWidthNow * absX);
+    }
     if (absY !== 1) {
       patch.fontSize = Math.max(10, baseFontSizeNow * absY);
       patch.padding = Math.max(0, Math.round((orig.padding ?? 0) * absY));
@@ -1209,6 +2175,58 @@ export const EditorWidget = React.forwardRef<
     if (orig.letterSpacing != null && absX !== 1) patch.letterSpacing = orig.letterSpacing * absX;
 
     commit(updateNode(historyRef.current.present, textId, patch));
+    markSuppressStageSelectionClear();
+  }
+
+  function commitArrowTransformEnd(arrowId: string, konvaArrow: Konva.Arrow) {
+    const orig = historyRef.current.present.nodes.find((n): n is ArrowNode => n.kind === 'arrow' && n.id === arrowId);
+    if (!orig) return;
+
+    const sx = konvaArrow.scaleX();
+    const sy = konvaArrow.scaleY();
+    if (Math.abs(sx - 1) < 0.001 && Math.abs(sy - 1) < 0.001) {
+      konvaArrow.scaleX(1);
+      konvaArrow.scaleY(1);
+      return;
+    }
+
+    const flat = konvaArrow.points();
+    if (flat.length < 4) {
+      konvaArrow.scaleX(1);
+      konvaArrow.scaleY(1);
+      return;
+    }
+
+    const absT = konvaArrow.getAbsoluteTransform();
+    const localStart = { x: flat[0]!, y: flat[1]! };
+    const localEnd = { x: flat[flat.length - 2]!, y: flat[flat.length - 1]! };
+    const startAbs = absT.point(localStart);
+    const endAbs = absT.point(localEnd);
+    const sp = stagePosition;
+    const sc = stageScale;
+    const docStart = { x: (startAbs.x - sp.x) / sc, y: (startAbs.y - sp.y) / sc };
+    const docEnd = { x: (endAbs.x - sp.x) / sc, y: (endAbs.y - sp.y) / sc };
+
+    konvaArrow.scaleX(1);
+    konvaArrow.scaleY(1);
+    konvaArrow.rotation(0);
+    konvaArrow.offsetX(0);
+    konvaArrow.offsetY(0);
+    konvaArrow.position({ x: 0, y: 0 });
+
+    commit(
+      updateNode(historyRef.current.present, arrowId, {
+        points: [docStart, docEnd],
+        strokeWidth: orig.strokeWidth,
+        pointerLength: orig.pointerLength,
+        pointerWidth: orig.pointerWidth,
+        stroke: orig.stroke,
+        arrowKind: orig.arrowKind,
+        layer: (orig as any).layer,
+        locked: (orig as any).locked
+      } as Partial<ArrowNode>)
+    );
+    markSuppressStageSelectionClear();
   }
 
   function onStageMouseDown(e: Konva.KonvaEventObject<MouseEvent>) {
@@ -1223,31 +2241,63 @@ export const EditorWidget = React.forwardRef<
     const docPos = getPointerInDocument();
     if (!pos) return;
 
-    // Crop mode: drag a crop rectangle; affects only export output.
+    if (ocrRegionPickActiveRef.current) {
+      if (!docPos) return;
+      e.cancelBubble = true;
+      startOcrRegionPickDrag(docPos);
+      return;
+    }
+
+    // Crop mode: drag selection shape; affects only export output.
     if (transformMode === 'crop') {
+      if (!docPos) return;
       finishTextEditing();
-      setSelectedId(null);
+      clearNodeSelection();
       setActiveMosaicId(null);
       isDrawingRef.current = false;
       drawingNodeIdRef.current = null;
-      // Important:
-      // If a valid crop rect already exists, don't reset it on mouse-down.
-      // Otherwise the subsequent click-outside handler will think the click is
-      // inside a newly-created tiny rect and won't apply crop.
-      if (cropRectDoc && cropRectDoc.width >= 4 && cropRectDoc.height >= 4) {
+      if (isCropSelectionValid(cropSelection)) {
         return;
       }
-
-      // Initialize selection rect at mouse-down.
-      if (!cropRectDoc) {
-        setCropRectDoc({ x: docPos.x, y: docPos.y, width: 1, height: 1 });
+      isCropDrawingRef.current = true;
+      setCropDrawing(true);
+      cropDrawStartRef.current = docPos;
+      const shape = cropOptions.shape;
+      if (shape === 'freehand') {
+        setCropSelection({
+          shape: 'freehand',
+          box: { x: docPos.x, y: docPos.y, width: 1, height: 1 },
+          freehandPoints: [{ x: docPos.x, y: docPos.y }],
+          cornerRadius: cropOptions.cornerRadius
+        });
       } else {
-        // Keep current rect; transformer will handle drag/resize.
+        setCropSelection(null);
       }
       return;
     }
 
     if (tool.kind === 'text') {
+      const stage = stageRef.current;
+      if (stage && pos) {
+        const hit = pickArrowOrTextIdFromStageHit(stage, pos, historyRef.current.present);
+        if (hit === 'transformer') return;
+        if (hit) {
+          onSelectNode(hit);
+          return;
+        }
+      }
+      if (docPos) {
+        const nid = pickTopArrowOrTextAtDocPos(historyRef.current.present, docPos);
+        if (nid) {
+          onSelectNode(nid);
+          return;
+        }
+      }
+      const sid = selectedIdRef.current;
+      if (sid) {
+        const sel = historyRef.current.present.nodes.find((n) => n.id === sid);
+        if (sel?.kind === 'arrow' || sel?.kind === 'text') return;
+      }
       isTextCreatingRef.current = true;
       drawStartRef.current = docPos ?? pos;
       return;
@@ -1256,26 +2306,63 @@ export const EditorWidget = React.forwardRef<
     if (tool.kind === 'select') {
       const stage = stageRef.current;
       const clickedOnEmpty = stage?.getIntersection(pos) == null;
-      // Non-editing/select mode: allow dragging the whole canvas directly on empty area.
-      // Keep space-drag behavior as compatible fallback.
-      if (clickedOnEmpty && (spacePressedRef.current || !editingTextId)) {
+      // Only allow panning when user holds Space (prevents accidental drags during editing workflows).
+      if (clickedOnEmpty && spacePressedRef.current) {
         panStartRef.current = { pointer: pos, position: { ...stagePosition } };
       }
       return;
     }
 
+    // Arrow tool: never start a new stroke on top of existing arrows/text or the transformer.
+    if (tool.kind === 'arrow') {
+      const stage = stageRef.current;
+      if (stage && pos) {
+        const hit = pickArrowOrTextIdFromStageHit(stage, pos, historyRef.current.present);
+        if (hit === 'transformer') return;
+        if (hit) {
+          onSelectNode(hit);
+          return;
+        }
+      }
+      if (docPos) {
+        const nid = pickTopArrowOrTextAtDocPos(historyRef.current.present, docPos);
+        if (nid) {
+          onSelectNode(nid);
+          return;
+        }
+      }
+      const sid = selectedIdRef.current;
+      if (sid) {
+        const sel = historyRef.current.present.nodes.find((n) => n.id === sid);
+        if (sel?.kind === 'arrow' || sel?.kind === 'text') return;
+      }
+    }
+
     if (!docPos) return;
+
+    if (tool.kind === 'mosaic') {
+      const stage = stageRef.current;
+      const hitId = stage ? pickMosaicIdFromStageHit(stage, pos, historyRef.current.present) : null;
+      const mosaicId = hitId ?? pickTopMosaicAtDocPos(historyRef.current.present, docPos);
+      if (mosaicId) {
+        const shiftKey = !!(e.evt as MouseEvent).shiftKey;
+        const prev = selectedMosaicIdsRef.current;
+        const alreadySelected =
+          prev.includes(mosaicId) || (prev.length === 0 && selectedIdRef.current === mosaicId);
+        if (shiftKey || !alreadySelected) onSelectMosaicNode(mosaicId, shiftKey);
+        return;
+      }
+    }
+
     isDrawingRef.current = true;
     drawStartRef.current = docPos;
     drawingNodeIdRef.current = null;
 
     if (tool.kind === 'mosaic' && (tool.mode ?? 'rect') === 'rect') {
-      // Ensure mosaic base snapshot is up-to-date at the moment drawing starts
-      // (prevents mosaicing against stale pre-resize text geometry).
+      // Keep a fresh background snapshot at draw start.
       const snap = captureSnapshotCanvasNow();
       if (snap) {
         setBaseCanvas(snap);
-        setSnapshotVersion((v) => v + 1);
       }
       const next = addMosaicRect(history.present, {
         x: docPos.x,
@@ -1291,7 +2378,10 @@ export const EditorWidget = React.forwardRef<
       if (id) setActiveMosaicId(id);
       // Create one undo step for the whole drag gesture.
       commit(next);
-      setSelectedId(id);
+      if (id) {
+        setSelectedMosaicIds([id]);
+        setSelectedId(id);
+      }
       return;
     }
 
@@ -1299,7 +2389,6 @@ export const EditorWidget = React.forwardRef<
       const snap = captureSnapshotCanvasNow();
       if (snap) {
         setBaseCanvas(snap);
-        setSnapshotVersion((v) => v + 1);
       }
       lastBrushPosRef.current = docPos;
       const brushSize = tool.brushSize ?? tool.pixelSize * 2;
@@ -1315,7 +2404,10 @@ export const EditorWidget = React.forwardRef<
       if (id) setActiveMosaicId(id);
       // Create one undo step for the whole brush stroke.
       commit(next);
-      setSelectedId(id);
+      if (id) {
+        setSelectedMosaicIds([id]);
+        setSelectedId(id);
+      }
       return;
     }
 
@@ -1326,7 +2418,9 @@ export const EditorWidget = React.forwardRef<
         stroke: tool.stroke,
         strokeWidth: tool.strokeWidth,
         pointerLength: tool.pointerLength,
-        pointerWidth: tool.pointerWidth
+        pointerWidth: tool.pointerWidth,
+        opacity: tool.opacity ?? 1,
+        shadow: tool.shadow ?? false
       });
       const id = next.nodes[next.nodes.length - 1]?.id ?? null;
       drawingNodeIdRef.current = id;
@@ -1353,6 +2447,35 @@ export const EditorWidget = React.forwardRef<
       }
     }
     if (tool.kind === 'text') {
+      return;
+    }
+    if (ocrRegionPickActiveRef.current && ocrRegionPickDrawingRef.current) {
+      updateOcrRegionPickDrag();
+      return;
+    }
+    if (transformMode === 'crop' && isCropDrawingRef.current) {
+      const start = cropDrawStartRef.current;
+      const docPos = getPointerInDocument();
+      if (!docPos) return;
+      const shape = cropOptions.shape;
+      if (shape === 'freehand') {
+        if (!start) return;
+        setCropSelection((prev) => {
+          const pts = [...(prev?.freehandPoints ?? []), docPos];
+          if (pts.length >= 2) {
+            const last = pts[pts.length - 2]!;
+            const dx = docPos.x - last.x;
+            const dy = docPos.y - last.y;
+            if (dx * dx + dy * dy < 4) return prev;
+          }
+          const box = clampCropBox(boundsFromPoints(pts));
+          if (!box) return prev;
+          return { shape: 'freehand', box, freehandPoints: pts, cornerRadius: cropOptions.cornerRadius };
+        });
+      } else if (start) {
+        const box = cropBoxFromPointerDrag(start, docPos, shape, 1);
+        setCropSelection({ shape, box, cornerRadius: cropOptions.cornerRadius });
+      }
       return;
     }
     if (!isDrawingRef.current) return;
@@ -1406,6 +2529,34 @@ export const EditorWidget = React.forwardRef<
     if (bgDragMode) {
       return;
     }
+    if (ocrRegionPickActiveRef.current && ocrRegionPickDrawingRef.current) {
+      endOcrRegionPickDrag();
+      return;
+    }
+    if (transformMode === 'crop' && isCropDrawingRef.current) {
+      const start = cropDrawStartRef.current;
+      const end = getPointerInDocument();
+      const shape = cropOptions.shape;
+      isCropDrawingRef.current = false;
+      setCropDrawing(false);
+      cropDrawStartRef.current = null;
+      if (start && end && shape !== 'freehand') {
+        const raw = cropBoxFromPointerDrag(start, end, shape, 4);
+        const c = clampCropBox(raw);
+        if (c) {
+          setCropSelection({ shape, box: c, cornerRadius: cropOptions.cornerRadius });
+        } else {
+          setCropSelection(null);
+        }
+      } else if (shape === 'freehand') {
+        const sel = cropSelectionRef.current;
+        if (sel?.shape === 'freehand') {
+          const c = clampCropBox(sel.box);
+          if (c) setCropSelection((prev) => (prev ? { ...prev, box: c } : null));
+        }
+      }
+      return;
+    }
     if (isPanningRef.current) {
       isPanningRef.current = false;
       panStartRef.current = null;
@@ -1421,7 +2572,7 @@ export const EditorWidget = React.forwardRef<
       isTextCreatingRef.current = false;
       drawStartRef.current = null;
       if (!start || !pos) {
-        if (hadPanStart) setSelectedId(null);
+        if (hadPanStart) clearNodeSelection();
         return;
       }
       const dx = pos.x - start.x;
@@ -1438,38 +2589,32 @@ export const EditorWidget = React.forwardRef<
         align: tool.align ?? ('left' as const),
         lineHeight: tool.lineHeight ?? 1.25,
         letterSpacing: tool.letterSpacing ?? 0,
-        fontWeight: tool.fontWeight
+        fontWeight: tool.fontWeight,
+        fontItalic: tool.fontItalic,
+        underline: tool.underline,
+        mode: 'singleLine' as const
       };
 
-      let nextDoc: EditorDocument;
-      if (dist < 4) {
-        // Single click: single-line text
-        nextDoc = addText(history.present, {
-          x: pos.x,
-          y: pos.y,
-          mode: 'singleLine',
-          ...baseTextProps
-        });
-      } else {
-        // Dragged rectangle: area text
-        const r = normalizeRect(start, pos);
-        nextDoc = addText(history.present, {
-          x: r.x,
-          y: r.y,
-          mode: 'area',
-          width: Math.max(40, r.width),
-          ...baseTextProps
-        });
-      }
+      // Always horizontal text; only Enter adds newlines (no narrow box auto-wrap).
+      const place = dist < 4 ? pos : normalizeRect(start, pos);
+      const nextDoc = addText(history.present, {
+        x: place.x,
+        y: place.y,
+        ...baseTextProps
+      });
       const last = nextDoc.nodes[nextDoc.nodes.length - 1] ?? null;
       const id = last?.id ?? null;
       commit(nextDoc);
+      setSelectedMosaicIds([]);
       setSelectedId(id);
+      if (last?.kind === 'text') {
+        queueMicrotask(() => startEditingTextNode(last));
+      }
       props.options?.onTextCreated?.();
       return;
     }
 
-    if (hadPanStart) setSelectedId(null);
+    if (hadPanStart) clearNodeSelection();
 
     if (!isDrawingRef.current) return;
     isDrawingRef.current = false;
@@ -1484,7 +2629,7 @@ export const EditorWidget = React.forwardRef<
     if (node?.kind === 'mosaicRect') {
       if (node.width < 4 || node.height < 4) {
         setHistory((h) => cancelLastPush(h));
-        setSelectedId(null);
+        clearNodeSelection();
         return;
       }
       // Ensure rect uses final pointer position (mouseUp can happen without a last mouseMove).
@@ -1501,7 +2646,7 @@ export const EditorWidget = React.forwardRef<
     if (node?.kind === 'mosaicStroke') {
       if (node.points.length < 2) {
         setHistory((h) => cancelLastPush(h));
-        setSelectedId(null);
+        clearNodeSelection();
       } else {
         // Keep arrow/text above mosaics at all times: do not split/lock nodes under mosaic region.
         const region = strokeBounds(node);
@@ -1523,8 +2668,8 @@ export const EditorWidget = React.forwardRef<
         setHistory((h) => cancelLastPush(h));
         return;
       }
-      // Only select if a real arrow was drawn (prevents tiny transformer box flash).
-      setSelectedId(id);
+      // Stay in arrow tool: do not select the new arrow so the next drag creates another arrow.
+      clearNodeSelection();
     }
 
     setActiveMosaicId(null);
@@ -1533,6 +2678,7 @@ export const EditorWidget = React.forwardRef<
   function startEditingTextNode(node: TextNode) {
     setEditingTextId(node.id);
     setEditingTextDraft(node.text);
+    setSelectedMosaicIds([]);
     setSelectedId(node.id);
     // Focus after render.
     queueMicrotask(() => {
@@ -1554,41 +2700,44 @@ export const EditorWidget = React.forwardRef<
       const stage = stageRef.current;
       if (!stage) return;
       const docPos = getPointerInDocument();
-      if (!docPos || !cropRectDoc) return;
+      if (!docPos || !cropSelection) return;
 
-      // Finish crop only when user clicks outside the selection rectangle.
-      const inside =
-        docPos.x >= cropRectDoc.x &&
-        docPos.x <= cropRectDoc.x + cropRectDoc.width &&
-        docPos.y >= cropRectDoc.y &&
-        docPos.y <= cropRectDoc.y + cropRectDoc.height;
-
-      if (!inside) applyCropNow();
+      if (!pointInCropSelection(docPos, cropSelection)) void applyCropNow();
       return;
     }
-    if (tool.kind === 'select') {
+    if (tool.kind === 'select' || tool.kind === 'arrow' || tool.kind === 'text') {
+      if (suppressNextStageSelectionClearRef.current) {
+        suppressNextStageSelectionClearRef.current = false;
+        return;
+      }
       const stage = stageRef.current;
-      const clickedOnEmpty = !!stage && e.target === stage;
-      if (clickedOnEmpty) setSelectedId(null);
+      if (stage && shouldClearSelectionOnStageClick(stage)) clearNodeSelection();
     }
   }
 
-  function onSelectNode(id: string) {
+  function selectNodeCore(id: string) {
+    setSelectedMosaicIds([]);
     const node = history.present.nodes.find((n) => n.id === id) ?? null;
     if ((node as any)?.locked) {
-      setSelectedId(null);
+      clearNodeSelection();
       return;
     }
     setSelectedId(id);
   }
 
-  function moveMosaicNodeBy(node: MosaicRectNode | MosaicStrokeNode, dx: number, dy: number): EditorDocument {
-    if (node.kind === 'mosaicRect') {
-      return updateNode(historyRef.current.present, node.id, { x: node.x + dx, y: node.y + dy });
-    }
-    return updateNode(historyRef.current.present, node.id, {
-      points: node.points.map((p) => ({ x: p.x + dx, y: p.y + dy }))
-    });
+  function requestAnnotationEdit(kind: 'text' | 'arrow', id: string, edit?: () => void) {
+    selectNodeCore(id);
+    edit?.();
+    props.options?.onAnnotationEditRequest?.({ kind, id });
+    suppressAnnotationClickRef.current = true;
+    window.setTimeout(() => {
+      suppressAnnotationClickRef.current = false;
+    }, 0);
+  }
+
+  function onSelectNode(id: string) {
+    if (suppressAnnotationClickRef.current) return;
+    selectNodeCore(id);
   }
 
   function mosaicHitNode(n: MosaicRectNode | MosaicStrokeNode) {
@@ -1620,22 +2769,67 @@ export const EditorWidget = React.forwardRef<
     );
   }
 
+  function getExportDocumentRect(): { x: number; y: number; width: number; height: number } {
+    const doc = historyRef.current.present;
+    const docW = doc.width;
+    const docH = doc.height;
+    const img = bgImage;
+    if (!img) return { x: 0, y: 0, width: docW, height: docH };
+    const ox = bgOffsetDocRef.current.x;
+    const oy = bgOffsetDocRef.current.y;
+    const iw = img.naturalWidth || img.width || docW;
+    const ih = img.naturalHeight || img.height || docH;
+    return exportContentBoundsInDocument(docW, docH, iw, ih, ox, oy);
+  }
+
   function applyExportTransforms(
     srcCanvas: HTMLCanvasElement,
-    overrideCropRectDoc?: typeof cropRectDoc
+    overrideCrop?: CropSelection | null,
+    sourcePixelRatio = 1,
+    opts?: { alreadyDocSized?: boolean; docSize?: { width: number; height: number } }
   ): HTMLCanvasElement {
     let outCanvas: HTMLCanvasElement = srcCanvas;
 
-    // 1) Crop (stage canvas coords, derived from doc coords).
-    const effectiveCrop = overrideCropRectDoc ?? cropRectDoc;
-    if (effectiveCrop) {
-      const scale = stageScale;
-      const pos = stagePosition;
+    if (!opts?.alreadyDocSized) {
+      // Crop to the full document content rect (includes background drag offset).
+      const exportRect = getExportDocumentRect();
+      const { scale, position: pos } = getDocumentStageLayout();
+      const docX = (pos.x + exportRect.x * scale) * sourcePixelRatio;
+      const docY = (pos.y + exportRect.y * scale) * sourcePixelRatio;
+      const docWidth = exportRect.width * scale * sourcePixelRatio;
+      const docHeight = exportRect.height * scale * sourcePixelRatio;
 
-      const x = effectiveCrop.x * scale + pos.x;
-      const y = effectiveCrop.y * scale + pos.y;
-      const w = effectiveCrop.width * scale;
-      const h = effectiveCrop.height * scale;
+      const dsx = clamp(Math.round(docX), 0, outCanvas.width - 1);
+      const dsy = clamp(Math.round(docY), 0, outCanvas.height - 1);
+      const dex = clamp(Math.round(docX + docWidth), 0, outCanvas.width);
+      const dey = clamp(Math.round(docY + docHeight), 0, outCanvas.height);
+      const dcw = Math.max(1, dex - dsx);
+      const dch = Math.max(1, dey - dsy);
+
+      const docCanvas = document.createElement('canvas');
+      docCanvas.width = dcw;
+      docCanvas.height = dch;
+      const dctx = docCanvas.getContext('2d');
+      if (!dctx) return outCanvas;
+      dctx.drawImage(outCanvas, dsx, dsy, dcw, dch, 0, 0, dcw, dch);
+      outCanvas = docCanvas;
+    }
+
+    const docW = opts?.docSize?.width ?? historyRef.current.present.width;
+    const docH = opts?.docSize?.height ?? historyRef.current.present.height;
+    const effectiveCrop = overrideCrop ?? cropSelection;
+    const normalizedCrop =
+      effectiveCrop && effectiveCrop.shape === 'circle'
+        ? { ...effectiveCrop, box: toCircleBox(effectiveCrop.box) }
+        : effectiveCrop;
+    if (normalizedCrop && isCropSelectionValid(normalizedCrop)) {
+      const { box } = normalizedCrop;
+      const fx = outCanvas.width / Math.max(1, docW);
+      const fy = outCanvas.height / Math.max(1, docH);
+      const x = box.x * fx;
+      const y = box.y * fy;
+      const w = box.width * fx;
+      const h = box.height * fy;
 
       const sx = clamp(Math.round(x), 0, outCanvas.width - 1);
       const sy = clamp(Math.round(y), 0, outCanvas.height - 1);
@@ -1650,103 +2844,469 @@ export const EditorWidget = React.forwardRef<
       const ctx = cropCanvas.getContext('2d');
       if (!ctx) return outCanvas;
       ctx.drawImage(outCanvas, sx, sy, cw, ch, 0, 0, cw, ch);
-      outCanvas = cropCanvas;
+      outCanvas = applyCropShapeMask(cropCanvas, normalizedCrop, docW, docH);
     }
 
     return outCanvas;
   }
 
-  function applyCropNow() {
-    if (!cropRectDoc) return;
-    if (cropRectDoc.width < 4 || cropRectDoc.height < 4) return;
-    const stage = stageRef.current;
-    if (!stage) return;
+  async function ensureBgImageSynced(): Promise<HTMLImageElement | null> {
+    const src = bgSrc;
+    if (!src) return bgImage;
+    const doc = historyRef.current.present;
+    if (
+      bgImage &&
+      bgImage.src === src &&
+      (bgImage.naturalWidth || bgImage.width) === doc.width &&
+      (bgImage.naturalHeight || bgImage.height) === doc.height
+    ) {
+      return bgImage;
+    }
+    try {
+      const img = await loadHtmlImage(src);
+      setBgImage(img);
+      return img;
+    } catch {
+      return bgImage;
+    }
+  }
 
-    // Important: do NOT include crop UI (selection rectangle + transformer) into output.
-    const cropRectNode = cropRectNodeRef.current;
-    const transformer = transformerRef.current;
+  async function applyCropNow() {
+    if (!isCropSelectionValid(cropSelection) || !bgImage) return;
+    const exportCrop: CropSelection =
+      cropSelection.shape === 'circle'
+        ? { ...cropSelection, box: toCircleBox(cropSelection.box) }
+        : cropSelection;
+    const doc = historyRef.current.present;
+    const docW = doc.width;
+    const docH = doc.height;
 
-    const prevCropVisible = cropRectNode ? cropRectNode.visible() : true;
-    const prevTransformerVisible = transformer ? transformer.visible() : true;
+    const exportPixelRatio = (() => {
+      const maxDim = 16384;
+      const maxPixels = 180_000_000;
+      let ratio = 1;
+      ratio = Math.min(ratio, maxDim / Math.max(1, docW), maxDim / Math.max(1, docH));
+      const px = docW * ratio * docH * ratio;
+      if (px > maxPixels) ratio *= Math.sqrt(maxPixels / px);
+      return Math.max(1, ratio);
+    })();
 
-    if (cropRectNode) cropRectNode.visible(false);
-    if (transformer) transformer.visible(false);
-
-    const canvas = stage.toCanvas({ pixelRatio: 1 });
-    const transformed = applyExportTransforms(canvas, cropRectDoc);
-
-    // Restore for safety (we'll immediately reset states after cropping anyway).
-    if (cropRectNode) cropRectNode.visible(prevCropVisible);
-    if (transformer) transformer.visible(prevTransformerVisible);
-    const dataUrl = transformed.toDataURL('image/png');
-    const newDoc = createEmptyDocument({
-      width: transformed.width,
-      height: transformed.height,
-      backgroundSrc: dataUrl
+    const exportRect = getExportDocumentRect();
+    const compositeCanvas = await renderDocCompositeWithMosaics(exportPixelRatio, exportRect);
+    const relCrop: CropSelection = {
+      ...exportCrop,
+      box: {
+        x: exportCrop.box.x - exportRect.x,
+        y: exportCrop.box.y - exportRect.y,
+        width: exportCrop.box.width,
+        height: exportCrop.box.height
+      },
+      freehandPoints: exportCrop.freehandPoints?.map((p) => ({
+        x: p.x - exportRect.x,
+        y: p.y - exportRect.y
+      }))
+    };
+    const transformedRaw = applyExportTransforms(compositeCanvas, relCrop, exportPixelRatio, {
+      alreadyDocSized: true,
+      docSize: { width: exportRect.width, height: exportRect.height }
     });
+    const cropBox = exportCrop.box;
+    const transformed = normalizeCanvasToDocSize(transformedRaw, cropBox.width, cropBox.height);
+    const dataUrl = transformed.toDataURL('image/png');
+    const croppedImg = await loadHtmlImage(dataUrl);
 
-    // Make crop undoable: replace document with cropped background.
-    setHistory((h) => pushHistory(h, newDoc));
+    // Mosaics are baked into the cropped background; keep arrows/text as editable nodes.
+    const nonMosaicNodes = doc.nodes.filter((n) => n.kind !== 'mosaicRect' && n.kind !== 'mosaicStroke');
+    const croppedDoc = cropDocumentToRegion(
+      { ...doc, nodes: nonMosaicNodes, background: { kind: 'image', src: dataUrl } },
+      cropBox
+    );
 
-    // Background rendering must follow the history background.
+    invalidateMosaicCaches();
+    setHistory((h) => {
+      const next = pushHistory(h, croppedDoc);
+      historyRef.current = next;
+      return next;
+    });
     bgSrcUpdateOriginRef.current = 'history';
     setBgSrc(dataUrl);
+    setBgImage(croppedImg);
+    setBgOffsetDoc({ x: 0, y: 0 });
+    setUndoRedoKey((k) => k + 1);
+    applyStageLayoutForDocument(croppedDoc.width, croppedDoc.height);
 
-    props.options?.onCropApplied?.();
+    props.options?.onCropApplied?.({
+      dataUrl,
+      width: croppedDoc.width,
+      height: croppedDoc.height
+    });
     setTransformModeState('none');
-    setCropRectDoc(null);
-    setSelectedId(null);
+    setCropSelection(null);
+    clearNodeSelection();
     setActiveMosaicId(null);
   }
 
-  function clampCropRectDoc(next: typeof cropRectDoc): typeof cropRectDoc {
-    if (!next) return null;
-    const docW = historyRef.current.present.width;
-    const docH = historyRef.current.present.height;
-    if (docW <= 0 || docH <= 0) return null;
+  function getCropClampBounds(): CropBox {
+    return getExportDocumentRect();
+  }
 
-    const minSize = 4;
-    const width = Math.max(minSize, Math.min(next.width, docW));
-    const height = Math.max(minSize, Math.min(next.height, docH));
-    const x = clamp(next.x, 0, Math.max(0, docW - width));
-    const y = clamp(next.y, 0, Math.max(0, docH - height));
-    return { x, y, width, height };
+  function clampCropBox(next: { x: number; y: number; width: number; height: number }) {
+    return clampCropBoxToBounds(next, getCropClampBounds(), 4);
+  }
+
+  function patchCropBox(box: { x: number; y: number; width: number; height: number }) {
+    const shape = cropSelection?.shape ?? cropOptions.shape;
+    const normalized = shape === 'circle' ? toCircleBox(box) : box;
+    const clamped = clampCropBox(normalized);
+    if (!clamped) return;
+    setCropSelection((prev) => ({
+      shape: prev?.shape ?? cropOptions.shape,
+      box: clamped,
+      cornerRadius: prev?.cornerRadius ?? cropOptions.cornerRadius,
+      freehandPoints: prev?.freehandPoints
+    }));
+  }
+
+  function shouldRenderCropOverlay(sel: CropSelection | null): sel is CropSelection {
+    if (!sel) return false;
+    if (cropDrawing) return true;
+    if (sel.shape === 'freehand') return (sel.freehandPoints?.length ?? 0) >= 1;
+    return sel.box.width >= 2 && sel.box.height >= 2;
+  }
+
+  /** Crop UI must sit above mosaic/arrow/text so handles stay draggable. */
+  function renderCropSelectionOverlay(): React.ReactNode {
+    if (transformMode !== 'crop' || !shouldRenderCropOverlay(cropSelection)) return null;
+    const sel = cropSelection;
+    const strokeProps = {
+      stroke: 'rgba(76,159,254,0.95)' as const,
+      strokeWidth: 2,
+      fill: 'rgba(76,159,254,0.12)' as const,
+      listening: true as const
+    };
+
+    if (sel.shape === 'freehand' && sel.freehandPoints && sel.freehandPoints.length > 0) {
+      const pts = sel.freehandPoints;
+      const closed = !cropDrawing && pts.length >= 3;
+      if (pts.length === 1) {
+        return (
+          <Rect
+            ref={() => {
+              cropNodeRef.current = null;
+            }}
+            x={pts[0]!.x - 4}
+            y={pts[0]!.y - 4}
+            width={8}
+            height={8}
+            cornerRadius={4}
+            {...strokeProps}
+            dash={[]}
+            draggable={false}
+            listening={false}
+          />
+        );
+      }
+      return (
+        <Line
+          ref={(n) => {
+            cropNodeRef.current = n;
+          }}
+          points={pts.flatMap((p) => [p.x, p.y])}
+          closed={closed}
+          dash={cropDrawing ? [] : [6, 4]}
+          lineCap="round"
+          lineJoin="round"
+          strokeWidth={cropDrawing ? 2.5 : 2}
+          hitStrokeWidth={20}
+          fill={closed ? strokeProps.fill : 'transparent'}
+          fillEnabled={closed}
+          listening={!cropDrawing}
+          draggable={false}
+          stroke={strokeProps.stroke}
+        />
+      );
+    }
+
+    if (sel.shape === 'circle') {
+      const c = toCircleBox(sel.box);
+      const r = c.width / 2;
+      return (
+        <Ellipse
+          ref={(n) => {
+            cropNodeRef.current = n;
+          }}
+          x={c.x + r}
+          y={c.y + r}
+          radiusX={r}
+          radiusY={r}
+          dash={cropDrawing ? [] : [6, 4]}
+          draggable={!cropDrawing}
+          onDragMove={(ev) => {
+            const node = ev.target as unknown as Konva.Ellipse;
+            const rad = Math.max(node.radiusX(), node.radiusY());
+            patchCropBox({
+              x: node.x() - rad,
+              y: node.y() - rad,
+              width: rad * 2,
+              height: rad * 2
+            });
+          }}
+          onTransformEnd={(ev) => {
+            const node = ev.target as unknown as Konva.Ellipse;
+            const sx = node.scaleX();
+            const sy = node.scaleY();
+            node.scaleX(1);
+            node.scaleY(1);
+            const rad = Math.max(node.radiusX() * sx, node.radiusY() * sy);
+            patchCropBox({
+              x: node.x() - rad,
+              y: node.y() - rad,
+              width: rad * 2,
+              height: rad * 2
+            });
+          }}
+          {...strokeProps}
+        />
+      );
+    }
+
+    return (
+      <Rect
+        ref={(n) => {
+          cropNodeRef.current = n;
+        }}
+        x={sel.box.x}
+        y={sel.box.y}
+        width={Math.max(sel.box.width, cropDrawing ? 1 : 4)}
+        height={Math.max(sel.box.height, cropDrawing ? 1 : 4)}
+        cornerRadius={sel.shape === 'roundRect' ? (sel.cornerRadius ?? cropOptions.cornerRadius) : 0}
+        dash={cropDrawing ? [] : [6, 4]}
+        draggable={!cropDrawing}
+        onDragMove={(ev) => {
+          const node = ev.target as unknown as Konva.Rect;
+          patchCropBox({
+            x: node.x(),
+            y: node.y(),
+            width: node.width(),
+            height: node.height()
+          });
+        }}
+        onTransformEnd={(ev) => {
+          const node = ev.target as unknown as Konva.Rect;
+          const scaleX = node.scaleX();
+          const scaleY = node.scaleY();
+          const newW = node.width() * scaleX;
+          const newH = node.height() * scaleY;
+          node.scaleX(1);
+          node.scaleY(1);
+          patchCropBox({
+            x: node.x(),
+            y: node.y(),
+            width: newW,
+            height: newH
+          });
+        }}
+        {...strokeProps}
+      />
+    );
+  }
+
+  async function resolveMosaicLayerImage(
+    style: 'pixel' | 'blur',
+    pixelSize: number,
+    blurRadius: number,
+    docSize: { width: number; height: number },
+    source: HTMLImageElement | HTMLCanvasElement
+  ): Promise<HTMLImageElement | null> {
+    if (style === 'blur') {
+      const cached = pickNearestCachedMosaicImage(blurRadius, blurCache, baseSnapshotKey);
+      if (cached) return cached;
+      const dataUrl =
+        source instanceof HTMLImageElement
+          ? await createBlurredDataUrl(source, blurRadius)
+          : await createBlurredDataUrlFromSource(source, docSize, blurRadius);
+      return await loadHtmlImage(dataUrl);
+    }
+    const cached = pickNearestCachedMosaicImage(pixelSize, pixelCache, baseSnapshotKey);
+    if (cached) return cached;
+    const dataUrl =
+      source instanceof HTMLImageElement
+        ? await createPixelatedDataUrl(source, pixelSize)
+        : await createPixelatedDataUrlFromSource(source, docSize, pixelSize);
+    return await loadHtmlImage(dataUrl);
+  }
+
+  /** Background + mosaic effects at document resolution (what the user sees). */
+  async function renderDocCompositeWithMosaics(
+    pixelRatio = 1,
+    bounds?: { x: number; y: number; width: number; height: number }
+  ): Promise<HTMLCanvasElement> {
+    if (!bgImage) throw new Error('Background not ready');
+    const doc = historyRef.current.present;
+    const docW = doc.width;
+    const docH = doc.height;
+    const exportRect = bounds ?? { x: 0, y: 0, width: docW, height: docH };
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(exportRect.width * pixelRatio));
+    canvas.height = Math.max(1, Math.round(exportRect.height * pixelRatio));
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return canvas;
+    ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+    ctx.drawImage(bgImage, bgOffsetDoc.x - exportRect.x, bgOffsetDoc.y - exportRect.y);
+
+    const docSize = { width: docW, height: docH };
+    const canUseBaseCanvas =
+      !!baseCanvas &&
+      baseCanvasBgSrc === (bgSrc ?? null) &&
+      !!baseCanvasOffset &&
+      baseCanvasOffset.x === bgOffsetDoc.x &&
+      baseCanvasOffset.y === bgOffsetDoc.y;
+    const source: HTMLImageElement | HTMLCanvasElement = canUseBaseCanvas ? baseCanvas! : bgImage;
+    const scale = pixelRatio;
+
+    for (const n of mosaicNodesInOrder) {
+      const style = ((n as any).style ?? 'pixel') as 'pixel' | 'blur';
+      const pixelSize = ((n as any).pixelSize as number | undefined) ?? 12;
+      const blurRadius = ((n as any).blurRadius as number | undefined) ?? 6;
+      const mosaicImg = await resolveMosaicLayerImage(style, pixelSize, blurRadius, docSize, source);
+      if (!mosaicImg) continue;
+
+      const ox = (bgOffsetDoc.x - exportRect.x) * scale;
+      const oy = (bgOffsetDoc.y - exportRect.y) * scale;
+      const dw = docW * scale;
+      const dh = docH * scale;
+
+      if (n.kind === 'mosaicRect') {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect((n.x - exportRect.x) * scale, (n.y - exportRect.y) * scale, n.width * scale, n.height * scale);
+        ctx.clip();
+        ctx.drawImage(mosaicImg, ox, oy, dw, dh);
+        ctx.restore();
+        continue;
+      }
+
+      const br = (n.brushSize / 2) * scale;
+      for (const p of n.points) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc((p.x - exportRect.x) * scale, (p.y - exportRect.y) * scale, br, 0, Math.PI * 2);
+        ctx.clip();
+        ctx.drawImage(mosaicImg, ox, oy, dw, dh);
+        ctx.restore();
+      }
+    }
+
+    return canvas;
   }
 
   async function exportBlob(options: { format: 'png' | 'jpeg' | 'webp'; quality?: number }) {
     const stage = stageRef.current;
     if (!stage) throw new Error('Stage not ready');
-    const canvas = stage.toCanvas({ pixelRatio: 1 });
-    const transformed = applyExportTransforms(canvas);
+    const layout = await prepareStageForExport();
+    const exportPixelRatio = (() => {
+      const scale = Math.max(0.0001, layout.scale);
+      let ratio = 1 / scale;
+      const maxDim = 16384;
+      const maxPixels = 180_000_000;
+      ratio = Math.min(ratio, maxDim / Math.max(1, stageSize.width), maxDim / Math.max(1, stageSize.height));
+      const px = (stageSize.width * ratio) * (stageSize.height * ratio);
+      if (px > maxPixels) ratio *= Math.sqrt(maxPixels / px);
+      return Math.max(1, ratio);
+    })();
+    const canvas = stage.toCanvas({ pixelRatio: exportPixelRatio });
+    const transformed = applyExportTransforms(canvas, undefined, exportPixelRatio);
     return await exportCanvasToBlob(transformed, options);
+  }
+
+  /** Mosaic / arrow / text only at document size; background omitted (transparent outside shapes). */
+  async function exportAnnotationsLayerBlob(options: { format: 'png' | 'jpeg' | 'webp'; quality?: number }) {
+    const stage = stageRef.current;
+    if (!stage) throw new Error('Stage not ready');
+    const base = baseGroupRef.current;
+    const transformer = transformerRef.current;
+    const chrome = annotationChromeGroupRef.current;
+    const prevBase = base?.visible() ?? true;
+    const prevTrans = transformer?.visible() ?? true;
+    const prevChrome = chrome?.visible() ?? true;
+    try {
+      base?.visible(false);
+      transformer?.visible(false);
+      chrome?.visible(false);
+      const layout = await prepareStageForExport();
+      const exportPixelRatio = (() => {
+        const scale = Math.max(0.0001, layout.scale);
+        let ratio = 1 / scale;
+        const maxDim = 16384;
+        const maxPixels = 180_000_000;
+        ratio = Math.min(ratio, maxDim / Math.max(1, stageSize.width), maxDim / Math.max(1, stageSize.height));
+        const px = (stageSize.width * ratio) * (stageSize.height * ratio);
+        if (px > maxPixels) ratio *= Math.sqrt(maxPixels / px);
+        return Math.max(1, ratio);
+      })();
+      const canvas = stage.toCanvas({ pixelRatio: exportPixelRatio });
+      const transformed = applyExportTransforms(canvas, undefined, exportPixelRatio);
+      return await exportCanvasToBlob(transformed, options);
+    } finally {
+      base?.visible(prevBase);
+      transformer?.visible(prevTrans);
+      chrome?.visible(prevChrome);
+      stage.batchDraw();
+    }
   }
 
   useImperativeHandle(ref, () => ({
     setTool(nextTool) {
       if (nextTool.kind !== 'text') finishTextEditing();
       setTool(nextTool);
-      if (nextTool.kind !== 'select') setSelectedId(null);
+      if (nextTool.kind !== 'select') clearNodeSelection();
       if (nextTool.kind !== 'select') {
         setTransformModeState('none');
-        setCropRectDoc(null);
+        setCropSelection(null);
       }
     },
     setTransformMode(mode) {
-      // Stop crop drag on mode switch.
-      if (mode === 'none') setCropRectDoc(null);
+      if (mode === 'none') {
+        setCropSelection(null);
+        isCropDrawingRef.current = false;
+        setCropDrawing(false);
+        cropDrawStartRef.current = null;
+      }
       if (mode === 'crop') {
-        const w = historyRef.current.present.width;
-        const h = historyRef.current.present.height;
-        setCropRectDoc((prev) => (prev && prev.width > 0 && prev.height > 0 ? prev : { x: 0, y: 0, width: w, height: h }));
+        setCropSelection(null);
+        isCropDrawingRef.current = false;
+        setCropDrawing(false);
+        cropDrawStartRef.current = null;
       }
       setTransformModeState(mode);
-      setSelectedId(null);
+      clearNodeSelection();
+    },
+    setCropOptions(options: Partial<CropOptions>) {
+      setCropOptionsState((prev) => ({
+        shape: options.shape ?? prev.shape,
+        cornerRadius: options.cornerRadius ?? prev.cornerRadius
+      }));
+      if (options.shape != null) {
+        setCropSelection(null);
+        isCropDrawingRef.current = false;
+        setCropDrawing(false);
+        cropDrawStartRef.current = null;
+      }
+    },
+    getCropOptions() {
+      return cropOptions;
     },
     clearCrop() {
-      setCropRectDoc(null);
+      setCropSelection(null);
+      isCropDrawingRef.current = false;
+      setCropDrawing(false);
+      cropDrawStartRef.current = null;
     },
     resetTransforms() {
-      setCropRectDoc(null);
+      setCropSelection(null);
+      isCropDrawingRef.current = false;
+      setCropDrawing(false);
+      cropDrawStartRef.current = null;
       setTransformModeState('none');
     },
     applyTextStyle(style) {
@@ -1760,6 +3320,8 @@ export const EditorWidget = React.forwardRef<
         if (style.fontSize != null) patch.fontSize = style.fontSize;
         if (style.fontFamily != null) patch.fontFamily = style.fontFamily;
         if (style.fontWeight != null) patch.fontWeight = style.fontWeight;
+        if (style.fontItalic != null) patch.fontItalic = style.fontItalic;
+        if (style.underline != null) patch.underline = style.underline;
         if (style.align != null) patch.align = style.align;
         if (style.lineHeight != null) patch.lineHeight = style.lineHeight;
         if (style.letterSpacing != null) patch.letterSpacing = style.letterSpacing;
@@ -1780,30 +3342,97 @@ export const EditorWidget = React.forwardRef<
           patch.pointerLength = style.pointerSize;
           patch.pointerWidth = style.pointerSize;
         }
+        if (style.opacity != null) patch.opacity = style.opacity;
+        if (style.shadow != null) patch.shadow = style.shadow;
         return pushHistory(h, updateNode(h.present, id, patch));
       });
+    },
+    applyMosaicStyle(style) {
+      const ids =
+        selectedMosaicIdsRef.current.length > 0
+          ? [...selectedMosaicIdsRef.current]
+          : (() => {
+              const sid = selectedIdRef.current;
+              if (!sid) return [] as string[];
+              const n = historyRef.current.present.nodes.find((nn) => nn.id === sid) ?? null;
+              if (n && (n.kind === 'mosaicRect' || n.kind === 'mosaicStroke')) return [sid];
+              return [] as string[];
+            })();
+      if (ids.length === 0) return false;
+
+      const px = Math.max(2, Math.round(style.pixelSize));
+      const nextStyle = style.style;
+      const br = Math.max(0, Math.round(style.blurRadius));
+      const bs = Math.max(6, Math.min(48, Math.round(style.brushSize)));
+
+      function rectVisualEqual(a: MosaicRectNode, patch: Partial<MosaicRectNode>) {
+        const b = { ...a, ...patch } as MosaicRectNode;
+        const aBlur = a.style === 'blur' ? (a.blurRadius ?? 6) : null;
+        const bBlur = b.style === 'blur' ? (b.blurRadius ?? 6) : null;
+        return a.pixelSize === b.pixelSize && a.style === b.style && aBlur === bBlur;
+      }
+      function strokeVisualEqual(a: MosaicStrokeNode, patch: Partial<MosaicStrokeNode>) {
+        const b = { ...a, ...patch } as MosaicStrokeNode;
+        const aBlur = a.style === 'blur' ? (a.blurRadius ?? 6) : null;
+        const bBlur = b.style === 'blur' ? (b.blurRadius ?? 6) : null;
+        return a.pixelSize === b.pixelSize && a.style === b.style && aBlur === bBlur && a.brushSize === b.brushSize;
+      }
+
+      setHistory((h) => {
+        let next = h.present;
+        let changed = false;
+        for (const id of ids) {
+          const node = next.nodes.find((n) => n.id === id) ?? null;
+          if (!node) continue;
+          if (node.kind === 'mosaicRect') {
+            const patch: Partial<MosaicRectNode> = {
+              pixelSize: px,
+              style: nextStyle,
+              blurRadius: nextStyle === 'blur' ? br : undefined
+            };
+            if (rectVisualEqual(node, patch)) continue;
+            next = updateNode(next, id, patch);
+            changed = true;
+          } else if (node.kind === 'mosaicStroke') {
+            const patch: Partial<MosaicStrokeNode> = {
+              pixelSize: px,
+              style: nextStyle,
+              blurRadius: nextStyle === 'blur' ? br : undefined,
+              brushSize: bs
+            };
+            if (strokeVisualEqual(node, patch)) continue;
+            next = updateNode(next, id, patch);
+            changed = true;
+          }
+        }
+        if (!changed) return h;
+        return pushHistory(h, next);
+      });
+      return true;
     },
     undo() {
       finishTextEditing();
       const next = undo(historyRef.current);
+      invalidateMosaicCaches();
       bgSrcUpdateOriginRef.current = 'history';
       setBgSrc(next.present.background.src);
       setHistory(next);
       setUndoRedoKey((k) => k + 1);
-      setSelectedId(null);
+      clearNodeSelection();
       setTransformModeState('none');
-      setCropRectDoc(null);
+      setCropSelection(null);
     },
     redo() {
       finishTextEditing();
       const next = redo(historyRef.current);
+      invalidateMosaicCaches();
       bgSrcUpdateOriginRef.current = 'history';
       setBgSrc(next.present.background.src);
       setHistory(next);
       setUndoRedoKey((k) => k + 1);
-      setSelectedId(null);
+      clearNodeSelection();
       setTransformModeState('none');
-      setCropRectDoc(null);
+      setCropSelection(null);
     },
     saveTemplate() {
       if (!templateKey) {
@@ -1813,24 +3442,30 @@ export const EditorWidget = React.forwardRef<
       saveTemplateNow(historyRef.current.present);
     },
     applyTemplate() {
-      if (!templateKey) {
+      applyTemplateByKey(props.options?.template?.key ?? '');
+    },
+    applyTemplateByKey(userKey: string) {
+      const name = userKey.trim();
+      if (!name) {
         props.options?.onTemplateEvent?.({ type: 'invalid_key', key: '' });
         return;
       }
+      const storageKey = `screenshot_template_v1:${name}`;
       try {
-        const tpl = loadTemplate();
+        const tpl = loadTemplate(storageKey);
         if (!tpl) {
-          props.options?.onTemplateEvent?.({ type: 'not_found', key: templateKey });
+          props.options?.onTemplateEvent?.({ type: 'not_found', key: storageKey });
           return;
         }
+        const mergeExisting = templateApplyMergeExistingRef.current;
         const nodeCount = tpl.nodes.length;
-        setHistory((h) => pushHistory(h, applyTemplateToDocument(h.present, tpl)));
-        setSelectedId(null);
-        props.options?.onTemplateEvent?.({ type: 'apply', key: templateKey, nodeCount });
+        setHistory((h) => pushHistory(h, applyTemplateToDocument(h.present, tpl, { mergeExisting })));
+        clearNodeSelection();
+        props.options?.onTemplateEvent?.({ type: 'apply', key: storageKey, nodeCount });
       } catch (e) {
         props.options?.onTemplateEvent?.({
           type: 'error',
-          key: templateKey,
+          key: storageKey,
           message: e instanceof Error ? e.message : String(e)
         });
       }
@@ -1839,8 +3474,9 @@ export const EditorWidget = React.forwardRef<
       clearTemplateNow();
       // Also clear current annotation layer so user can remove an applied template immediately.
       setHistory((h) => pushHistory(h, { ...h.present, nodes: [] }));
-      setSelectedId(null);
-      setDetectedRegions([]);
+      clearNodeSelection();
+      detectedRegionsRef.current = [];
+      setDetectedRegionsState([]);
       setActiveMosaicId(null);
     },
     exportAnnotations() {
@@ -1851,19 +3487,24 @@ export const EditorWidget = React.forwardRef<
       const off = (snapshot as any).bgOffset;
       if (off && typeof off.x === 'number' && typeof off.y === 'number') setBgOffsetDoc({ x: off.x, y: off.y });
       else setBgOffsetDoc({ x: 0, y: 0 });
-      setHistory((h) => pushHistory(h, applyTemplateToDocument(h.present, snapshot as any)));
-      setSelectedId(null);
+      setHistory((h) =>
+        pushHistory(h, applyTemplateToDocument(h.present, snapshot as any, { mergeExisting: false }))
+      );
+      clearNodeSelection();
     },
     clearAnnotations() {
       setHistory((h) => pushHistory(h, { ...h.present, nodes: [] }));
-      setSelectedId(null);
-      setDetectedRegions([]);
+      clearNodeSelection();
+      detectedRegionsRef.current = [];
+      setDetectedRegionsState([]);
       setActiveMosaicId(null);
     },
-    setBackgroundDragMode(enabled) {
-      bgDragModeRef.current = !!enabled;
-      setBgDragMode(!!enabled);
-      setSelectedId(null);
+    setBackgroundDragMode(mode: boolean | 'align') {
+      const kind: BackgroundDragKind = mode === true ? 'align' : mode === false ? false : mode;
+      bgDragKindRef.current = kind;
+      bgDragModeRef.current = kind !== false;
+      setBgDragMode(kind !== false);
+      clearNodeSelection();
       setActiveMosaicId(null);
     },
     resetBackgroundOffset() {
@@ -1889,28 +3530,31 @@ export const EditorWidget = React.forwardRef<
       });
     },
     setDetectedRegions(rects: MosaicRectInput[]) {
-      setDetectedRegions(
-        rects.map((r, idx) => ({
-          ...r,
-          id: `det_${Date.now()}_${idx}`,
-          selected: true
-        }))
-      );
+      const next = rects.map((r, idx) => ({
+        ...r,
+        id: `det_${Date.now()}_${idx}`,
+        selected: true
+      }));
+      detectedRegionsRef.current = next;
+      setDetectedRegionsState(next);
     },
     clearDetectedRegions() {
-      setDetectedRegions([]);
+      detectedRegionsRef.current = [];
+      setDetectedRegionsState([]);
     },
     setAllDetectedRegionsSelected(selected: boolean) {
       setAllDetectedRegionsSelected(selected);
     },
     applyDetectedRegionsAsMosaic(options) {
-      if (detectedRegions.length === 0) return;
+      const regions = detectedRegionsRef.current;
+      if (regions.length === 0) return;
       const pixelSize = options?.pixelSize ?? 14;
       const style = options?.style ?? 'pixel';
       const blurRadius = style === 'blur' ? (options?.blurRadius ?? 6) : undefined;
-      const selected = detectedRegions.filter((r) => r.selected && r.width > 0 && r.height > 0);
+      const selected = regions.filter((r) => r.selected && r.width > 0 && r.height > 0);
       if (selected.length === 0) {
-        setDetectedRegions([]);
+        detectedRegionsRef.current = [];
+        setDetectedRegionsState([]);
         return;
       }
       setHistory((h) => {
@@ -1929,9 +3573,88 @@ export const EditorWidget = React.forwardRef<
         }
         return pushHistory(h, doc);
       });
-      setDetectedRegions([]);
+      detectedRegionsRef.current = [];
+      setDetectedRegionsState([]);
+    },
+    async getOcrInput(region?: MosaicRectInput) {
+      const doc = historyRef.current.present;
+      const dataUrl = await ensureDataUrlForOcr(doc.background.src);
+      const img = await loadHtmlImage(dataUrl);
+      const iw = img.naturalWidth || img.width || 1;
+      const ih = img.naturalHeight || img.height || 1;
+      if (!region || region.width <= 0 || region.height <= 0) {
+        return {
+          dataUrl,
+          imageWidth: iw,
+          imageHeight: ih,
+          docWidth: doc.width,
+          docHeight: doc.height
+        };
+      }
+      const sx = iw / Math.max(1, doc.width);
+      const sy = ih / Math.max(1, doc.height);
+      const rx = clamp(Math.floor(region.x * sx), 0, Math.max(0, iw - 1));
+      const ry = clamp(Math.floor(region.y * sy), 0, Math.max(0, ih - 1));
+      const rw = clamp(Math.ceil(region.width * sx), 1, iw - rx);
+      const rh = clamp(Math.ceil(region.height * sy), 1, ih - ry);
+      const canvas = document.createElement('canvas');
+      canvas.width = rw;
+      canvas.height = rh;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('Canvas not available');
+      ctx.drawImage(img, rx, ry, rw, rh, 0, 0, rw, rh);
+      return {
+        dataUrl: canvas.toDataURL('image/png'),
+        imageWidth: rw,
+        imageHeight: rh,
+        docWidth: region.width,
+        docHeight: region.height,
+        regionOffset: { x: region.x, y: region.y }
+      };
+    },
+    beginOcrRegionPick() {
+      ocrRegionPickActiveRef.current = true;
+      ocrRegionPickDrawingRef.current = false;
+      ocrRegionPickStartRef.current = null;
+      setOcrRegionPickPreview(null);
+      setOcrRegionPickActive(true);
+      finishTextEditing();
+      clearNodeSelection();
+      setTool({ kind: 'select' });
+    },
+    cancelOcrRegionPick() {
+      cancelOcrRegionPickInternal();
     },
     export: exportBlob,
+    exportAnnotationsLayer: exportAnnotationsLayerBlob,
+    selectMosaicsSameRow() {
+      const doc = historyRef.current.present;
+      const seed = findSeedMosaicId(selectedIdRef.current, selectedMosaicIdsRef.current, doc);
+      if (!seed) return { ok: false as const, count: 0 };
+      const ids = sortMosaicIdsByRowThenCol(doc, collectSameRowMosaicIds(doc, seed));
+      setSelectedMosaicIds(ids);
+      setSelectedId(seed);
+      setTool({ kind: 'select' });
+      return { ok: true as const, count: ids.length };
+    },
+    selectMosaicsSameColumn() {
+      const doc = historyRef.current.present;
+      const seed = findSeedMosaicId(selectedIdRef.current, selectedMosaicIdsRef.current, doc);
+      if (!seed) return { ok: false as const, count: 0 };
+      const ids = sortMosaicIdsByColThenRow(doc, collectSameColumnMosaicIds(doc, seed));
+      setSelectedMosaicIds(ids);
+      setSelectedId(seed);
+      setTool({ kind: 'select' });
+      return { ok: true as const, count: ids.length };
+    },
+    deleteSelectedMosaics() {
+      return removeSelectedMosaics();
+    },
+    isPointerOnAnnotationAt(clientX: number, clientY: number) {
+      const stage = stageRef.current;
+      if (!stage) return false;
+      return isPointerOnAnnotationAtClient(stage, clientX, clientY);
+    },
     destroy() {
       // React handles unmount; kept for API symmetry.
     }
@@ -1964,12 +3687,18 @@ export const EditorWidget = React.forwardRef<
       if (isTextInput) return;
 
       const key = e.key.toLowerCase();
+      if (key === 'escape' && ocrRegionPickActiveRef.current) {
+        e.preventDefault();
+        cancelOcrRegionPickInternal();
+        return;
+      }
       if (key === ' ') spacePressedRef.current = true;
       if ((e.ctrlKey || e.metaKey) && key === 'z') {
         e.preventDefault();
         if (e.shiftKey) {
           if (canRedo(history)) {
             const next = redo(history);
+            invalidateMosaicCaches();
             bgSrcUpdateOriginRef.current = 'history';
             setBgSrc(next.present.background.src);
             setHistory(next);
@@ -1978,35 +3707,48 @@ export const EditorWidget = React.forwardRef<
         } else {
           if (canUndo(history)) {
             const next = undo(history);
+            invalidateMosaicCaches();
             bgSrcUpdateOriginRef.current = 'history';
             setBgSrc(next.present.background.src);
             setHistory(next);
             setUndoRedoKey((k) => k + 1);
           }
         }
-        setSelectedId(null);
+        clearNodeSelection();
         setTransformModeState('none');
-        setCropRectDoc(null);
+        setCropSelection(null);
       }
       if ((e.ctrlKey || e.metaKey) && key === 'y') {
         e.preventDefault();
         if (canRedo(history)) {
           const next = redo(history);
+          invalidateMosaicCaches();
           bgSrcUpdateOriginRef.current = 'history';
           setBgSrc(next.present.background.src);
           setHistory(next);
           setUndoRedoKey((k) => k + 1);
         }
-        setSelectedId(null);
+        clearNodeSelection();
         setTransformModeState('none');
-        setCropRectDoc(null);
+        setCropSelection(null);
       }
       if (key === 'delete' || key === 'backspace') {
         e.preventDefault();
+        const mosaicIdsToRemove = selectedMosaicIds.filter((mid) => {
+          const node = history.present.nodes.find((nn) => nn.id === mid);
+          return node && (node.kind === 'mosaicRect' || node.kind === 'mosaicStroke');
+        });
+        if (mosaicIdsToRemove.length > 0) {
+          if (editingTextId) setEditingTextId(null);
+          commit(removeNodesByIds(history.present, new Set(mosaicIdsToRemove)));
+          clearNodeSelection();
+          setContextMenu(null);
+          return;
+        }
         if (!selectedId) return;
         if (selectedId === editingTextId) setEditingTextId(null);
         commit(removeNode(history.present, selectedId));
-        setSelectedId(null);
+        clearNodeSelection();
       }
       if (key === 'escape') {
         if (editingTextId) {
@@ -2017,7 +3759,7 @@ export const EditorWidget = React.forwardRef<
     };
     container.ownerDocument.addEventListener('keydown', onKeyDown);
     return () => container.ownerDocument.removeEventListener('keydown', onKeyDown);
-  }, [container, history, selectedId]);
+  }, [container, history, selectedId, selectedMosaicIds, editingTextId]);
 
   // Auto-save template (debounced) when annotations change.
   useEffect(() => {
@@ -2048,12 +3790,23 @@ export const EditorWidget = React.forwardRef<
     ? history.present.nodes.find((n): n is TextNode => n.kind === 'text' && n.id === editingTextId) ?? null
     : null;
   const editingTextRect = useMemo(() => {
-    if (!editingTextId) return null;
-    const stage = stageRef.current;
-    const node = stage?.findOne(`#${editingTextId}`) as unknown as Konva.Text | null;
-    if (!node) return null;
-    return node.getClientRect({ skipTransform: false });
-  }, [editingTextId, history.present.nodes]);
+    if (!editingTextNode) return null;
+    const measured = measureTextBlock(
+      editingTextDraft || ' ',
+      editingTextNode.fontSize,
+      editingTextNode.fontFamily,
+      (editingTextNode.padding ?? 0) + TEXT_RENDER_PADDING,
+      editingTextNode.lineHeight ?? 1.25,
+      editingTextNode.fontWeight,
+      editingTextNode.fontItalic
+    );
+    return {
+      x: editingTextNode.x * stageScale + stagePosition.x,
+      y: editingTextNode.y * stageScale + stagePosition.y,
+      width: measured.width * stageScale,
+      height: measured.height * stageScale
+    };
+  }, [editingTextNode, editingTextDraft, stageScale, stagePosition.x, stagePosition.y]);
 
   if (!bgImage) {
     return (
@@ -2108,6 +3861,9 @@ export const EditorWidget = React.forwardRef<
         >
           <Layer>
             <Group
+              ref={(n) => {
+                stageTransformGroupRef.current = n;
+              }}
               x={stagePosition.x}
               y={stagePosition.y}
               scaleX={stageScale}
@@ -2122,18 +3878,8 @@ export const EditorWidget = React.forwardRef<
                 image={bgImage}
                 x={bgOffsetDoc.x}
                 y={bgOffsetDoc.y}
-                listening={bgDragMode}
-                draggable={bgDragMode}
-                onDragMove={(ev) => {
-                  if (!bgDragMode) return;
-                  const n = ev.target as any;
-                  setBgOffsetDoc({ x: n.x(), y: n.y() });
-                }}
-                onDragEnd={(ev) => {
-                  if (!bgDragMode) return;
-                  const n = ev.target as any;
-                  setBgOffsetDoc({ x: n.x(), y: n.y() });
-                }}
+                listening={false}
+                draggable={false}
               />
               <Rect
                 x={0}
@@ -2145,55 +3891,46 @@ export const EditorWidget = React.forwardRef<
                 visible={false}
                 listening={false}
               />
-              {transformMode === 'crop' && cropRectDoc ? (
-                <Rect
-                  ref={(n) => (cropRectNodeRef.current = n)}
-                  x={cropRectDoc.x}
-                  y={cropRectDoc.y}
-                  width={cropRectDoc.width}
-                  height={cropRectDoc.height}
-                  stroke="rgba(76,159,254,0.95)"
-                  dash={[6, 4]}
-                  strokeWidth={2}
-                  fill="rgba(76,159,254,0.10)"
-                  draggable={true}
-                  listening={true}
-                  onDragMove={(ev) => {
-                    const node = ev.target as unknown as Konva.Rect;
-                    const next = clampCropRectDoc({
-                      x: node.x(),
-                      y: node.y(),
-                      width: node.width(),
-                      height: node.height()
-                    });
-                    if (!next) return;
-                    setCropRectDoc(next);
-                  }}
-                  onTransformEnd={(ev) => {
-                    const node = ev.target as unknown as Konva.Rect;
-                    const scaleX = node.scaleX();
-                    const scaleY = node.scaleY();
-                    const newW = node.width() * scaleX;
-                    const newH = node.height() * scaleY;
-                    node.scaleX(1);
-                    node.scaleY(1);
-                    const next = clampCropRectDoc({
-                      x: node.x(),
-                      y: node.y(),
-                      width: newW,
-                      height: newH
-                    });
-                    if (!next) return;
-                    setCropRectDoc(next);
-                  }}
-                />
-              ) : null}
             </Group>
+            {/* Multi-select group drag handle (below mosaic tiles so selected tiles stay draggable) */}
+            {selectedMosaicIds.length > 1 && transformMode !== 'crop' && !bgDragMode
+              ? (() => {
+                  const union = unionMosaicBounds(history.present, selectedMosaicIds);
+                  if (!union) return null;
+                  return (
+                    <Rect
+                      key="mosaic_multi_drag_box"
+                      name="mosaic_multi_drag_box"
+                      x={union.x}
+                      y={union.y}
+                      width={union.width}
+                      height={union.height}
+                      fill="rgba(76,159,254,0.1)"
+                      stroke="rgba(76,159,254,0.85)"
+                      strokeWidth={1.5}
+                      dash={[6, 4]}
+                      hitStrokeWidth={20}
+                      listening={true}
+                      draggable={true}
+                      onClick={(ev) => {
+                        ev.cancelBubble = true;
+                      }}
+                      onDragStart={() => handleMosaicGroupDragStart(union.x, union.y)}
+                      onDragMove={handleMosaicGroupDragMove}
+                      onDragEnd={handleMosaicGroupDragEnd}
+                    />
+                  );
+                })()
+              : null}
             {/* Render mosaics above background, but below arrow/text layer */}
-            {mosaicNodesInOrder
-              .filter((n) => !activeMosaicId || n.id !== activeMosaicId)
-              .map((n) => {
-                const canDragMosaic = tool.kind === 'select' && transformMode !== 'crop' && !bgDragMode;
+            {mosaicNodesInOrder.map((n) => {
+                const isThisMosaicSelected =
+                  selectedMosaicSet.has(n.id) || (selectedMosaicIds.length === 0 && selectedId === n.id);
+                const canDragThisMosaic =
+                  transformMode !== 'crop' &&
+                  !bgDragMode &&
+                  isThisMosaicSelected &&
+                  (tool.kind === 'select' || tool.kind === 'mosaic');
                 const style = (n as any).style ?? 'pixel';
                 const w = history.present.width;
                 const h = history.present.height;
@@ -2201,189 +3938,136 @@ export const EditorWidget = React.forwardRef<
                 const fallbackX = bgOffsetDoc.x;
                 const fallbackY = bgOffsetDoc.y;
 
+                const mosaicClipFunc = (ctx: Konva.Context) => {
+                  if (n.kind === 'mosaicRect') {
+                    ctx.rect(n.x, n.y, n.width, n.height);
+                    return;
+                  }
+                  ctx.beginPath();
+                  const br = n.brushSize / 2;
+                  for (const p of n.points) {
+                    ctx.moveTo(p.x + br, p.y);
+                    ctx.arc(p.x, p.y, br, 0, Math.PI * 2);
+                  }
+                };
+
                 if (style === 'blur') {
                   const radius = ((n as any).blurRadius as number | undefined) ?? 6;
-                  const cached = blurCache[radius];
-                  const img = cached?.key === baseSnapshotKey ? cached.img : null;
-                  if (!img) {
-                    return (
-                      <Group
-                        key={`mosaic_blur_ph_${radius}_${n.id}`}
-                        id={n.id}
-                        listening={true}
-                        draggable={canDragMosaic}
-                        onClick={(ev) => {
-                          ev.cancelBubble = true;
-                          onSelectNode(n.id);
-                        }}
-                        onDragEnd={(ev) => {
-                          const g = ev.target as unknown as Konva.Group;
-                          const dx = g.x();
-                          const dy = g.y();
-                          g.position({ x: 0, y: 0 });
-                          if (Math.abs(dx) < 0.01 && Math.abs(dy) < 0.01) return;
-                          commit(moveMosaicNodeBy(n, dx, dy));
-                        }}
-                        clipFunc={(ctx) => {
-                          if (n.kind === 'mosaicRect') {
-                            ctx.rect(n.x, n.y, n.width, n.height);
-                            return;
-                          }
-                          // mosaicStroke
-                          ctx.beginPath();
-                          const r = n.brushSize / 2;
-                          for (const p of n.points) {
-                            ctx.moveTo(p.x + r, p.y);
-                            ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-                          }
-                        }}
-                      >
-                        {mosaicHitNode(n)}
-                        <KonvaImage image={fallbackSource} x={fallbackX} y={fallbackY} width={w} height={h} listening={false} />
-                      </Group>
-                    );
-                  }
+                  const img = pickNearestCachedMosaicImage(radius, blurCache, baseSnapshotKey);
                   return (
                     <Group
-                      key={`mosaic_blur_${radius}_${n.id}`}
+                      key={n.id}
                       id={n.id}
-                      listening={true}
-                      draggable={canDragMosaic}
+                      ref={(node) => {
+                        if (node) mosaicGroupNodeRefs.current.set(n.id, node);
+                        else mosaicGroupNodeRefs.current.delete(n.id);
+                      }}
+                      listening={transformMode !== 'crop'}
+                      draggable={canDragThisMosaic}
                       onClick={(ev) => {
                         ev.cancelBubble = true;
-                        onSelectNode(n.id);
+                        onSelectMosaicNode(n.id, !!(ev.evt as MouseEvent).shiftKey);
                       }}
-                      onDragEnd={(ev) => {
-                        const g = ev.target as unknown as Konva.Group;
-                        const dx = g.x();
-                        const dy = g.y();
-                        g.position({ x: 0, y: 0 });
-                        if (Math.abs(dx) < 0.01 && Math.abs(dy) < 0.01) return;
-                        commit(moveMosaicNodeBy(n, dx, dy));
-                      }}
-                      clipFunc={(ctx) => {
-                        if (n.kind === 'mosaicRect') {
-                          ctx.rect(n.x, n.y, n.width, n.height);
-                          return;
+                      onContextMenu={(ev) => {
+                        ev.evt.preventDefault();
+                        const pos = stageRef.current?.getPointerPosition();
+                        if (!pos) return;
+                        if (!selectedMosaicSet.has(n.id) && selectedMosaicIds.length === 0) {
+                          onSelectMosaicNode(n.id, false);
                         }
-                        // mosaicStroke
-                        ctx.beginPath();
-                        const r = n.brushSize / 2;
-                        for (const p of n.points) {
-                          ctx.moveTo(p.x + r, p.y);
-                          ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-                        }
+                        setContextMenu({ x: pos.x, y: pos.y, nodeId: n.id, kind: 'mosaic' });
                       }}
+                      onDragStart={() => handleMosaicDragStart(n.id)}
+                      onDragMove={(ev) => handleMosaicDragMove(n.id, ev)}
+                      onDragEnd={(ev) => handleMosaicDragEnd(n.id, ev)}
+                      clipFunc={mosaicClipFunc}
                     >
                       {mosaicHitNode(n)}
-                      <KonvaImage image={img} x={bgOffsetDoc.x} y={bgOffsetDoc.y} width={w} height={h} listening={false} />
+                      <KonvaImage image={img ?? fallbackSource} x={fallbackX} y={fallbackY} width={w} height={h} listening={false} />
                     </Group>
                   );
                 }
 
-                // pixel (default)
                 const size = (n as any).pixelSize as number;
-                const cached = pixelCache[size];
-                const img = cached?.key === baseSnapshotKey ? cached.img : null;
-                if (!img) {
-                  return (
-                    <Group
-                      key={`mosaic_pixel_ph_${size}_${n.id}`}
-                      id={n.id}
-                      listening={true}
-                      draggable={canDragMosaic}
-                      onClick={(ev) => {
-                        ev.cancelBubble = true;
-                        onSelectNode(n.id);
-                      }}
-                      onDragEnd={(ev) => {
-                        const g = ev.target as unknown as Konva.Group;
-                        const dx = g.x();
-                        const dy = g.y();
-                        g.position({ x: 0, y: 0 });
-                        if (Math.abs(dx) < 0.01 && Math.abs(dy) < 0.01) return;
-                        commit(moveMosaicNodeBy(n, dx, dy));
-                      }}
-                      clipFunc={(ctx) => {
-                        if (n.kind === 'mosaicRect') {
-                          ctx.rect(n.x, n.y, n.width, n.height);
-                          return;
-                        }
-                        // mosaicStroke
-                        ctx.beginPath();
-                        const r = n.brushSize / 2;
-                        for (const p of n.points) {
-                          ctx.moveTo(p.x + r, p.y);
-                          ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-                        }
-                      }}
-                    >
-                      {mosaicHitNode(n)}
-                      <KonvaImage image={fallbackSource} x={fallbackX} y={fallbackY} width={w} height={h} listening={false} />
-                    </Group>
-                  );
-                }
+                const img = pickNearestCachedMosaicImage(size, pixelCache, baseSnapshotKey);
                 return (
                   <Group
-                    key={`mosaic_pixel_${size}_${n.id}`}
+                    key={n.id}
                     id={n.id}
-                    listening={true}
-                    draggable={canDragMosaic}
+                    ref={(node) => {
+                      if (node) mosaicGroupNodeRefs.current.set(n.id, node);
+                      else mosaicGroupNodeRefs.current.delete(n.id);
+                    }}
+                    listening={transformMode !== 'crop'}
+                    draggable={canDragThisMosaic}
                     onClick={(ev) => {
                       ev.cancelBubble = true;
-                      onSelectNode(n.id);
+                      onSelectMosaicNode(n.id, !!(ev.evt as MouseEvent).shiftKey);
                     }}
-                    onDragEnd={(ev) => {
-                      const g = ev.target as unknown as Konva.Group;
-                      const dx = g.x();
-                      const dy = g.y();
-                      g.position({ x: 0, y: 0 });
-                      if (Math.abs(dx) < 0.01 && Math.abs(dy) < 0.01) return;
-                      commit(moveMosaicNodeBy(n, dx, dy));
-                    }}
-                    clipFunc={(ctx) => {
-                      if (n.kind === 'mosaicRect') {
-                        ctx.rect(n.x, n.y, n.width, n.height);
-                        return;
+                    onContextMenu={(ev) => {
+                      ev.evt.preventDefault();
+                      const pos = stageRef.current?.getPointerPosition();
+                      if (!pos) return;
+                      if (!selectedMosaicSet.has(n.id) && selectedMosaicIds.length === 0) {
+                        onSelectMosaicNode(n.id, false);
                       }
-                      // mosaicStroke
-                      ctx.beginPath();
-                      const r = n.brushSize / 2;
-                      for (const p of n.points) {
-                        ctx.moveTo(p.x + r, p.y);
-                        ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-                      }
+                      setContextMenu({ x: pos.x, y: pos.y, nodeId: n.id, kind: 'mosaic' });
                     }}
+                    onDragStart={() => handleMosaicDragStart(n.id)}
+                    onDragMove={(ev) => handleMosaicDragMove(n.id, ev)}
+                    onDragEnd={(ev) => handleMosaicDragEnd(n.id, ev)}
+                    clipFunc={mosaicClipFunc}
                   >
                     {mosaicHitNode(n)}
-                    <KonvaImage image={img} x={bgOffsetDoc.x} y={bgOffsetDoc.y} width={w} height={h} listening={false} />
+                    <KonvaImage image={img ?? fallbackSource} x={fallbackX} y={fallbackY} width={w} height={h} listening={false} />
                   </Group>
                 );
               })}
 
-            {/* Mosaic selection box (tight bounds) */}
-            {(() => {
-              if (!selectedId) return null;
-              const n = history.present.nodes.find((x) => x.id === selectedId) ?? null;
-              if (!n) return null;
-              if (n.kind !== 'mosaicRect' && n.kind !== 'mosaicStroke') return null;
-              const b =
-                n.kind === 'mosaicRect'
-                  ? { x: n.x, y: n.y, width: n.width, height: n.height }
-                  : strokeBounds(n);
-              return (
+            <Group ref={(n) => (annotationChromeGroupRef.current = n)}>
+              {/* Mosaic selection box (tight bounds) */}
+              {selectedMosaicIds.map((mid) => {
+                const n = history.present.nodes.find((x) => x.id === mid) ?? null;
+                if (!n || (n.kind !== 'mosaicRect' && n.kind !== 'mosaicStroke')) return null;
+                const b =
+                  n.kind === 'mosaicRect'
+                    ? { x: n.x, y: n.y, width: n.width, height: n.height }
+                    : strokeBounds(n);
+                return (
+                  <Rect
+                    key={`mos_sel_${mid}`}
+                    x={b.x}
+                    y={b.y}
+                    width={b.width}
+                    height={b.height}
+                    stroke="rgba(76,159,254,0.95)"
+                    dash={[6, 4]}
+                    strokeWidth={2}
+                    listening={false}
+                  />
+                );
+              })}
+
+              {/* Auto-detect hint boxes */}
+              {detectedRegions.map((r) => (
                 <Rect
-                  x={b.x}
-                  y={b.y}
-                  width={b.width}
-                  height={b.height}
-                  stroke="rgba(76,159,254,0.95)"
-                  dash={[6, 4]}
-                  strokeWidth={2}
-                  listening={false}
+                  key={r.id}
+                  x={r.x}
+                  y={r.y}
+                  width={r.width}
+                  height={r.height}
+                  fill={r.selected ? 'rgba(76,159,254,0.22)' : 'rgba(0,0,0,0.18)'}
+                  stroke={r.selected ? 'rgba(76,159,254,0.9)' : 'rgba(255,255,255,0.6)'}
+                  strokeWidth={1}
+                  dash={r.selected ? [] : [4, 4]}
+                  listening={transformMode !== 'crop'}
+                  onClick={(ev) => {
+                    ev.cancelBubble = true;
+                    toggleDetectedRegion(r.id);
+                  }}
                 />
-              );
-            })()}
+              ))}
+            </Group>
 
             {/* Nodes created/moved after mosaics should be on top and remain editable */}
             {topArrows.map((a) => {
@@ -2396,26 +4080,51 @@ export const EditorWidget = React.forwardRef<
                   stroke={a.stroke}
                   fill={a.stroke}
                   strokeWidth={a.strokeWidth}
+                  opacity={a.opacity ?? 1}
+                  {...arrowKonvaShadowProps(a.shadow)}
                   strokeScaleEnabled={false}
                   pointerLength={a.pointerLength}
                   pointerWidth={a.pointerWidth}
                   tension={disp.tension}
                   lineCap="round"
                   lineJoin="round"
-                  onClick={() => onSelectNode(a.id)}
+                  onMouseDown={(e) => {
+                    if (tool.kind !== 'arrow' && tool.kind !== 'text') return;
+                    e.cancelBubble = true;
+                    onSelectNode(a.id);
+                  }}
+                  onClick={(ev) => {
+                    ev.cancelBubble = true;
+                    onSelectNode(a.id);
+                  }}
+                  onDblClick={(ev) => {
+                    ev.cancelBubble = true;
+                    requestAnnotationEdit('arrow', a.id);
+                  }}
                   onContextMenu={(ev) => {
                     ev.evt.preventDefault();
                     const pos = stageRef.current?.getPointerPosition();
                     if (!pos) return;
+                    onSelectNode(a.id);
                     setContextMenu({ x: pos.x, y: pos.y, nodeId: a.id, kind: 'arrow' });
                   }}
                   hitStrokeWidth={Math.max(24, a.strokeWidth * 3)}
-                  draggable={tool.kind === 'select' && !(a as any).locked}
+                  listening={transformMode !== 'crop'}
+                  draggable={
+                    transformMode !== 'crop' &&
+                    !(a as any).locked &&
+                    (tool.kind === 'select' || (selectedId === a.id && (tool.kind === 'arrow' || tool.kind === 'text')))
+                  }
+                  onTransformEnd={(e) => {
+                    markSuppressStageSelectionClear();
+                    commitArrowTransformEnd(a.id, e.target as Konva.Arrow);
+                  }}
                   onDragEnd={(e) => {
                     const n = e.target;
                     const dx = n.x();
                     const dy = n.y();
                     n.position({ x: 0, y: 0 });
+                    if (Math.abs(dx) >= 0.01 || Math.abs(dy) >= 0.01) markSuppressStageSelectionClear();
                     commit(
                       updateNode(history.present, a.id, {
                         points: [
@@ -2431,7 +4140,7 @@ export const EditorWidget = React.forwardRef<
               );
               if ((a as any).clipRects && (a as any).clipRects.length > 0) {
                 return (
-                  <Group key={`clip_top_${a.id}`} clipFunc={rectUnionClipFunc((a as any).clipRects)} listening={false}>
+                  <Group key={`clip_top_${a.id}`} clipFunc={rectUnionClipFunc((a as any).clipRects)} listening={true}>
                     {arrowEl}
                   </Group>
                 );
@@ -2451,33 +4160,55 @@ export const EditorWidget = React.forwardRef<
                   text={t.text}
                   fontSize={t.fontSize}
                   fontFamily={t.fontFamily}
-                  fontStyle={t.fontWeight === 'bold' || t.fontWeight === 700 ? 'bold' : 'normal'}
+                  fontStyle={konvaFontStyle(t)}
+                  textDecoration={konvaTextDecoration(t)}
                   fill={t.fill}
-                  padding={(t.padding ?? 0) + 6}
-                  width={t.width ?? (t.mode === 'singleLine' ? 320 : undefined)}
+                  padding={(t.padding ?? 0) + TEXT_RENDER_PADDING}
+                  width={textKonvaWidth(t)}
                   height={isEmpty ? minHeight : undefined}
-                  wrap={t.mode === 'area' ? 'word' : 'none'}
+                  wrap={textKonvaWrap(t)}
                   align={t.align ?? 'left'}
                   lineHeight={t.lineHeight ?? 1.25}
                   letterSpacing={t.letterSpacing ?? 0}
                   visible={t.id !== editingTextId}
+                  onMouseDown={(e) => {
+                    if (tool.kind !== 'arrow' && tool.kind !== 'text') return;
+                    e.cancelBubble = true;
+                    onSelectNode(t.id);
+                  }}
                   onClick={(ev) => {
                     ev.cancelBubble = true;
                     onSelectNode(t.id);
-                    if (tool.kind === 'text') startEditingText(t.id);
                   }}
                   onDblClick={(ev) => {
                     ev.cancelBubble = true;
-                    startEditingText(t.id);
+                    requestAnnotationEdit('text', t.id, () => startEditingText(t.id));
                   }}
-                  draggable={tool.kind === 'select' && !editingTextId && !(t as any).locked}
+                  onContextMenu={(ev) => {
+                    ev.evt.preventDefault();
+                    const pos = stageRef.current?.getPointerPosition();
+                    if (!pos) return;
+                    onSelectNode(t.id);
+                    setContextMenu({ x: pos.x, y: pos.y, nodeId: t.id, kind: 'text' });
+                  }}
+                  listening={transformMode !== 'crop'}
+                  draggable={
+                    transformMode !== 'crop' &&
+                    !editingTextId &&
+                    !(t as any).locked &&
+                    (tool.kind === 'select' || (selectedId === t.id && (tool.kind === 'arrow' || tool.kind === 'text')))
+                  }
                   onDragEnd={(e) => {
                     const n = e.target;
+                    if (Math.abs(n.x() - t.x) >= 0.01 || Math.abs(n.y() - t.y) >= 0.01) {
+                      markSuppressStageSelectionClear();
+                    }
                     commit(
                       updateNode(historyRef.current.present, t.id, { x: n.x(), y: n.y(), layer: 'top', locked: false } as any)
                     );
                   }}
                   onTransformEnd={(e) => {
+                    markSuppressStageSelectionClear();
                     commitKonvaTextTransform(t.id, e.target as Konva.Text);
                   }}
                 />
@@ -2492,30 +4223,15 @@ export const EditorWidget = React.forwardRef<
               return textEl;
             })}
 
-            {/* Auto-detect hint boxes should be above mosaics */}
-            {detectedRegions.map((r) => (
-              <Rect
-                key={r.id}
-                x={r.x}
-                y={r.y}
-                width={r.width}
-                height={r.height}
-                fill={r.selected ? 'rgba(76,159,254,0.22)' : 'rgba(0,0,0,0.18)'}
-                stroke={r.selected ? 'rgba(76,159,254,0.9)' : 'rgba(255,255,255,0.6)'}
-                strokeWidth={1}
-                dash={r.selected ? [] : [4, 4]}
-                listening={true}
-                onClick={(ev) => {
-                  ev.cancelBubble = true;
-                  toggleDetectedRegion(r.id);
-                }}
-              />
-            ))}
+            {renderCropSelectionOverlay()}
 
             <Transformer
               ref={(n) => (transformerRef.current = n)}
               rotateEnabled={false}
               keepRatio={false}
+              visible={!ocrRegionPickActive}
+              onTransformStart={markSuppressStageSelectionClear}
+              onTransformEnd={markSuppressStageSelectionClear}
               boundBoxFunc={(oldBox, newBox) => {
                 // Lines/arrows can have 0 width/height (perfectly horizontal/vertical),
                 // which makes Transformer math unstable and can make the shape "disappear".
@@ -2535,6 +4251,41 @@ export const EditorWidget = React.forwardRef<
                 'bottom-right'
               ]}
             />
+
+            {ocrRegionPickActive ? (
+              <Group listening={true}>
+                <Rect
+                  x={0}
+                  y={0}
+                  width={history.present.width}
+                  height={history.present.height}
+                  fill="rgba(76,159,254,0.06)"
+                  stroke="rgba(76,159,254,0.35)"
+                  strokeWidth={1}
+                  dash={[8, 6]}
+                  listening={true}
+                  onMouseDown={(e) => {
+                    e.cancelBubble = true;
+                    const docPos = getPointerInDocument();
+                    if (!docPos) return;
+                    startOcrRegionPickDrag(docPos);
+                  }}
+                />
+                {ocrRegionPickPreview ? (
+                  <Rect
+                    x={ocrRegionPickPreview.x}
+                    y={ocrRegionPickPreview.y}
+                    width={ocrRegionPickPreview.width}
+                    height={ocrRegionPickPreview.height}
+                    stroke="rgba(76,159,254,0.95)"
+                    strokeWidth={2}
+                    dash={[6, 4]}
+                    fill="rgba(76,159,254,0.18)"
+                    listening={false}
+                  />
+                ) : null}
+              </Group>
+            ) : null}
             </Group>
 
             {/* Snapshot group (DOCUMENT coords): background only, no mosaics/arrows/texts. */}
@@ -2549,9 +4300,15 @@ export const EditorWidget = React.forwardRef<
             ref={(n) => (textareaRef.current = n)}
             value={editingTextDraft}
             onChange={(ev) => setEditingTextDraft(ev.target.value)}
-            onBlur={() => finishTextEditing()}
+            onBlur={() => {
+              if (ignoreTextBlurRef.current) {
+                ignoreTextBlurRef.current = false;
+                return;
+              }
+              finishTextEditing();
+            }}
             onKeyDown={(ev) => {
-              if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) {
+              if (ev.key === 'Escape') {
                 ev.preventDefault();
                 finishTextEditing();
               }
@@ -2561,10 +4318,10 @@ export const EditorWidget = React.forwardRef<
               left: editingTextRect.x,
               top: editingTextRect.y,
               zIndex: 5,
-              minWidth: 80,
-              width: Math.max(80, editingTextRect.width + 20),
+              minWidth: 120,
+              width: Math.max(120, editingTextRect.width + 12),
               minHeight: 28,
-              height: Math.max(28, editingTextRect.height + 16),
+              height: Math.max(28, editingTextRect.height + 8),
               padding: 6,
               borderRadius: 4,
               border: '1px solid rgba(76,159,254,0.9)',
@@ -2574,10 +4331,19 @@ export const EditorWidget = React.forwardRef<
               color: editingTextNode.fill,
               fontSize: editingTextNode.fontSize * stageScale,
               fontFamily: editingTextNode.fontFamily,
-              lineHeight: 1.25
+              fontWeight: editingTextNode.fontWeight === 'bold' || editingTextNode.fontWeight === 700 ? 'bold' : 'normal',
+              fontStyle: editingTextNode.fontItalic ? 'italic' : 'normal',
+              textDecoration: editingTextNode.underline ? 'underline' : 'none',
+              textAlign: editingTextNode.align ?? 'left',
+              lineHeight: editingTextNode.lineHeight ?? 1.25,
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'normal',
+              overflowWrap: 'normal',
+              writingMode: 'horizontal-tb'
             }}
           />
         ) : null}
+
 
         {contextMenu ? (
           <div
@@ -2606,7 +4372,10 @@ export const EditorWidget = React.forwardRef<
                 textAlign: 'left',
                 cursor: 'pointer'
               }}
-              onClick={() => deleteNodeById(contextMenu.nodeId)}
+              onClick={() => {
+                if (contextMenu.kind === 'mosaic') removeSelectedMosaics();
+                else deleteNodeById(contextMenu.nodeId);
+              }}
             >
               删除
             </button>

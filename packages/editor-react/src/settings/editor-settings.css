@@ -1,0 +1,247 @@
+.fscSettingsOverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: grid;
+  place-items: center;
+  z-index: 9998;
+  padding: 16px;
+}
+
+.fscSettingsDialog {
+  width: min(640px, 100%);
+  max-height: min(560px, 88vh);
+  display: flex;
+  flex-direction: column;
+  border-radius: 8px;
+  background: #1a1d26;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+  color: #e7eaf0;
+  overflow: hidden;
+}
+
+.fscSettingsTitle {
+  margin: 0;
+  padding: 12px 16px 0;
+  font-size: 15px;
+  font-weight: 600;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding-bottom: 10px;
+}
+
+.fscSettingsTabs {
+  display: flex;
+  flex-wrap: wrap;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.2);
+  padding: 0 4px;
+}
+
+.fscSettingsTab {
+  padding: 10px 14px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: rgba(231, 234, 240, 0.82);
+  font-size: 13px;
+  cursor: pointer;
+  margin-bottom: -1px;
+}
+
+.fscSettingsTab:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.fscSettingsTab.active {
+  color: #fff;
+  border-bottom-color: #4c9ffe;
+  background: rgba(76, 159, 254, 0.08);
+}
+
+.fscSettingsBody {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px 16px;
+}
+
+.fscSettingsSection {
+  display: grid;
+  gap: 12px;
+}
+
+.fscSettingsSectionEditor {
+  gap: 10px;
+}
+
+.fscSettingsNote {
+  margin: 0;
+  font-size: 12px;
+  opacity: 0.72;
+  line-height: 1.45;
+}
+
+.fscCheckRow {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.fscCheckRow input {
+  margin-top: 3px;
+  flex-shrink: 0;
+}
+
+.fscFieldRow {
+  display: grid;
+  grid-template-columns: minmax(120px, 42%) 1fr;
+  gap: 10px 12px;
+  align-items: start;
+  font-size: 13px;
+}
+
+.fscFieldLabel {
+  opacity: 0.88;
+  padding-top: 7px;
+}
+
+.fscFieldControl {
+  min-width: 0;
+}
+
+.fscHotkeyTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.fscHotkeyTable th,
+.fscHotkeyTable td {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.fscHotkeyTable th {
+  background: rgba(255, 255, 255, 0.06);
+  font-weight: 600;
+}
+
+.fscHotkeyTable kbd {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(0, 0, 0, 0.35);
+  font-size: 12px;
+}
+
+.fscHotkeyRecorder {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 140px;
+  min-height: 32px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(0, 0, 0, 0.28);
+  color: #e7eaf0;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.fscHotkeyRecorder:hover {
+  border-color: rgba(76, 159, 254, 0.55);
+  background: rgba(76, 159, 254, 0.08);
+}
+
+.fscHotkeyRecorder.recording {
+  border-color: #4c9ffe;
+  box-shadow: 0 0 0 1px rgba(76, 159, 254, 0.35);
+  color: #9ecbff;
+}
+
+.fscHotkeyRecorder:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.fscHotkeyRecorderSep {
+  opacity: 0.65;
+  padding: 0 2px;
+}
+
+.fscHotkeyRecorderInvalid {
+  color: #ff8a80;
+}
+
+.fscSettingsFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.15);
+}
+
+.fscSettingsBtn {
+  padding: 6px 16px;
+  min-width: 72px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.08);
+  color: #e7eaf0;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.fscSettingsBtn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.fscSettingsBtn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.fscSettingsBtnPrimary {
+  border-color: rgba(76, 159, 254, 0.85);
+  background: #4c9ffe;
+  color: #0b1120;
+  font-weight: 600;
+}
+
+.fscSettingsBtnPrimary:hover {
+  background: #6ab0ff;
+}
+
+.templatePreviewBody {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.templatePreviewFrame {
+  display: grid;
+  place-items: center;
+  padding: 12px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.templatePreviewImg {
+  max-width: 100%;
+  max-height: min(360px, 50vh);
+  object-fit: contain;
+  border-radius: 4px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}

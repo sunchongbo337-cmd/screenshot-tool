@@ -1,37 +1,31 @@
 {
   "manifest_version": 3,
-  "name": "ScreenShot (Ctrl+Shift+A)",
-  "version": "0.1.0",
-  "description": "Global-ish Ctrl+Shift+A screen capture with selection overlay.",
+  "name": "ScreenShot (Alt+Shift+A)",
+  "version": "0.1.12",
+  "description": "Alt+Shift+A region screenshot — https pages + new-tab/search fallback.",
   "action": {
-    "default_title": "ScreenShot"
+    "default_title": "ScreenShot — Alt+Shift+A region capture"
   },
   "background": {
-    "service_worker": "background.js",
-    "type": "module"
+    "service_worker": "background.js"
   },
-  "permissions": ["activeTab", "tabs", "scripting", "storage", "offscreen"],
+  "permissions": ["activeTab", "tabs", "scripting", "clipboardWrite", "desktopCapture"],
   "host_permissions": ["<all_urls>"],
   "commands": {
     "capture": {
       "suggested_key": {
-        "default": "Ctrl+Shift+A"
+        "default": "Alt+Shift+A",
+        "mac": "Alt+Shift+A"
       },
-      "description": "Capture screen (show selection overlay)"
+      "description": "Region screenshot (js-web-screen-shot)"
     }
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
+      "matches": ["http://*/*", "https://*/*", "file://*/*"],
       "js": ["content.js"],
-      "run_at": "document_idle"
-    }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": ["overlay.css"],
-      "matches": ["<all_urls>"]
+      "run_at": "document_end",
+      "all_frames": false
     }
   ]
 }
-

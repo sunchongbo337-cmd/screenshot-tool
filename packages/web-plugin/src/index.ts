@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import type { Tool, ExportOptions } from '@screenshot/editor-core';
 import { EditorWidget } from '@screenshot/editor-react';
 import type {
+  CropOptions,
   EditorWidgetHandle,
   EditorWidgetOptions,
   ImageSource,
@@ -17,8 +18,13 @@ export type CreateEditorParams = {
     initialTool?: Tool;
     initialAnnotations?: EditorWidgetOptions['initialAnnotations'];
     onTextCreated?: () => void;
-    onCropApplied?: () => void;
+    onAnnotationEditRequest?: EditorWidgetOptions['onAnnotationEditRequest'];
+    onOcrRegionPicked?: EditorWidgetOptions['onOcrRegionPicked'];
+    onOcrRegionPickCancelled?: EditorWidgetOptions['onOcrRegionPickCancelled'];
+    onCropApplied?: (result?: { dataUrl: string; width: number; height: number }) => void;
     onSelectionChange?: EditorWidgetOptions['onSelectionChange'];
+    onMosaicSelectionChange?: EditorWidgetOptions['onMosaicSelectionChange'];
+    onTemplateEvent?: EditorWidgetOptions['onTemplateEvent'];
     template?: EditorWidgetOptions['template'];
   };
   auth?: {
@@ -30,6 +36,8 @@ export type CreateEditorParams = {
 export type EditorInstance = {
   setTool(tool: Tool): void;
   setTransformMode(mode: 'none' | 'crop'): void;
+  setCropOptions(options: Partial<CropOptions>): void;
+  getCropOptions(): CropOptions;
   clearCrop(): void;
   resetTransforms(): void;
   addMosaicRects(rects: MosaicRectInput[]): void;
@@ -37,11 +45,23 @@ export type EditorInstance = {
   clearDetectedRegions(): void;
   setAllDetectedRegionsSelected(selected: boolean): void;
   applyDetectedRegionsAsMosaic(options?: { pixelSize?: number; style?: 'pixel' | 'blur'; blurRadius?: number }): void;
+  getOcrInput(region?: MosaicRectInput): Promise<{
+    dataUrl: string;
+    imageWidth: number;
+    imageHeight: number;
+    docWidth: number;
+    docHeight: number;
+    regionOffset?: { x: number; y: number };
+  }>;
+  beginOcrRegionPick(): void;
+  cancelOcrRegionPick(): void;
   applyTextStyle(style: {
     fill?: string;
     fontSize?: number;
     fontFamily?: string;
     fontWeight?: 'normal' | 'bold' | number;
+    fontItalic?: boolean;
+    underline?: boolean;
     align?: 'left' | 'center' | 'right' | 'justify';
     lineHeight?: number;
     letterSpacing?: number;
@@ -51,18 +71,32 @@ export type EditorInstance = {
     stroke?: string;
     strokeWidth?: number;
     pointerSize?: number;
+    opacity?: number;
+    shadow?: boolean;
   }): void;
+  applyMosaicStyle(style: {
+    pixelSize: number;
+    style: 'pixel' | 'blur';
+    blurRadius: number;
+    brushSize: number;
+  }): boolean;
+  isPointerOnAnnotationAt(clientX: number, clientY: number): boolean;
   undo(): void;
   redo(): void;
   saveTemplate(): void;
   applyTemplate(): void;
+  applyTemplateByKey(userKey: string): void;
   clearTemplate(): void;
   exportAnnotations(): AnnotationSnapshotV1;
   importAnnotations(snapshot: AnnotationSnapshotV1): void;
   clearAnnotations(): void;
-  setBackgroundDragMode(enabled: boolean): void;
+  setBackgroundDragMode(mode: false | 'align'): void;
   resetBackgroundOffset(): void;
   export(options: ExportOptions): Promise<Blob>;
+  exportAnnotationsLayer(options: ExportOptions): Promise<Blob>;
+  selectMosaicsSameRow(): { ok: boolean; count: number };
+  selectMosaicsSameColumn(): { ok: boolean; count: number };
+  deleteSelectedMosaics(): { ok: boolean; count: number };
   getAuth(): { token?: string; userId?: string } | undefined;
   destroy(): void;
 };
@@ -90,8 +124,13 @@ export function createEditor(params: CreateEditorParams): EditorInstance {
         initialTool: params.options?.initialTool,
         initialAnnotations: params.options?.initialAnnotations,
         onTextCreated: params.options?.onTextCreated,
+        onAnnotationEditRequest: params.options?.onAnnotationEditRequest,
+        onOcrRegionPicked: params.options?.onOcrRegionPicked,
+        onOcrRegionPickCancelled: params.options?.onOcrRegionPickCancelled,
         onCropApplied: params.options?.onCropApplied,
         onSelectionChange: params.options?.onSelectionChange,
+        onMosaicSelectionChange: params.options?.onMosaicSelectionChange,
+        onTemplateEvent: params.options?.onTemplateEvent,
         template: params.options?.template
       }
     })
@@ -103,6 +142,12 @@ export function createEditor(params: CreateEditorParams): EditorInstance {
     },
     setTransformMode(mode) {
       handleRef.current?.setTransformMode(mode);
+    },
+    setCropOptions(options) {
+      handleRef.current?.setCropOptions(options);
+    },
+    getCropOptions() {
+      return handleRef.current?.getCropOptions() ?? { shape: 'rect', cornerRadius: 24 };
     },
     clearCrop() {
       handleRef.current?.clearCrop();
@@ -125,11 +170,27 @@ export function createEditor(params: CreateEditorParams): EditorInstance {
     applyDetectedRegionsAsMosaic(options) {
       handleRef.current?.applyDetectedRegionsAsMosaic(options);
     },
+    async getOcrInput(region) {
+      if (!handleRef.current) throw new Error('Editor not ready');
+      return handleRef.current.getOcrInput(region);
+    },
+    beginOcrRegionPick() {
+      handleRef.current?.beginOcrRegionPick();
+    },
+    cancelOcrRegionPick() {
+      handleRef.current?.cancelOcrRegionPick();
+    },
     applyTextStyle(style) {
       handleRef.current?.applyTextStyle(style);
     },
     applyArrowStyle(style) {
       handleRef.current?.applyArrowStyle(style);
+    },
+    applyMosaicStyle(style) {
+      return handleRef.current?.applyMosaicStyle(style) ?? false;
+    },
+    isPointerOnAnnotationAt(clientX, clientY) {
+      return handleRef.current?.isPointerOnAnnotationAt(clientX, clientY) ?? false;
     },
     undo() {
       handleRef.current?.undo();
@@ -142,6 +203,9 @@ export function createEditor(params: CreateEditorParams): EditorInstance {
     },
     applyTemplate() {
       handleRef.current?.applyTemplate();
+    },
+    applyTemplateByKey(userKey: string) {
+      handleRef.current?.applyTemplateByKey(userKey);
     },
     clearTemplate() {
       handleRef.current?.clearTemplate();
@@ -166,6 +230,22 @@ export function createEditor(params: CreateEditorParams): EditorInstance {
       if (!handleRef.current) throw new Error('Editor not ready');
       return handleRef.current.export(options);
     },
+    exportAnnotationsLayer(options) {
+      if (!handleRef.current) throw new Error('Editor not ready');
+      return handleRef.current.exportAnnotationsLayer(options);
+    },
+    selectMosaicsSameRow() {
+      if (!handleRef.current) throw new Error('Editor not ready');
+      return handleRef.current.selectMosaicsSameRow();
+    },
+    selectMosaicsSameColumn() {
+      if (!handleRef.current) throw new Error('Editor not ready');
+      return handleRef.current.selectMosaicsSameColumn();
+    },
+    deleteSelectedMosaics() {
+      if (!handleRef.current) throw new Error('Editor not ready');
+      return handleRef.current.deleteSelectedMosaics();
+    },
     getAuth() {
       return auth;
     },
@@ -175,3 +255,16 @@ export function createEditor(params: CreateEditorParams): EditorInstance {
   };
 }
 
+export {
+  installWebRegionCaptureHotkey,
+  startWebRegionCapture,
+  startJsWebScreenShotCapture,
+  JsWebScreenShotCancelledError,
+  JsWebScreenShotClosedError,
+  buildDisplayMediaCaptureConfig
+} from '@screenshot/editor-react';
+export type { WebRegionCaptureHotkeyOptions, JsWebScreenShotStartOptions } from '@screenshot/editor-react';
+export {
+  DEFAULT_HOTKEY_JS_WEB_SCREEN_SHOT,
+  DEFAULT_HOTKEY_WEB_REGION_CAPTURE
+} from '@screenshot/editor-core';

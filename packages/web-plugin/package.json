@@ -10,7 +10,8 @@
     "dist"
   ],
   "scripts": {
-    "dev": "vite",
+    "dev": "vite -c vite.demo.config.ts",
+    "dev:lib": "vite",
     "build": "vite build",
     "build:demo": "vite build -c vite.demo.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
@@ -27,6 +28,7 @@
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
+    "js-web-screen-shot": "^2.0.2",
     "vite": "^5.4.2",
     "vite-plugin-dts": "^3.9.1"
   }

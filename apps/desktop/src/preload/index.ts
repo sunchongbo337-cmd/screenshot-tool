@@ -54,6 +54,28 @@ function parseDataUrl(dataUrl: string): { mime: string; buffer: Uint8Array } {
   return { mime, buffer: bytes };
 }
 
+type CaptureAppPrefsBridge = {
+  copyToClipboardAfterCapture: boolean;
+  playSoundAfterCapture: boolean;
+  editorAlwaysOnTop: boolean;
+  openFolderAfterSave: boolean;
+  minimizeEditorAfterSave: boolean;
+  defaultSaveDir: string;
+  saveFilenamePattern: string;
+  saveFilenameNextNumber: number;
+  defaultTemplateNamePattern: string;
+  defaultTemplateNextNumber: number;
+  captureDelaySeconds: number;
+  closeButtonAction: 'quit' | 'minimize';
+  toolbarCloseButtonAction: 'exit_editing' | 'close_current';
+  multiImageNavMode: 'tabs' | 'arrows';
+  autoSaveImages: boolean;
+  finishButtonAction: 'save' | 'next';
+  hotkeyRegionCapture: string;
+  hotkeyJsWebScreenShot: string;
+  hotkeyBrowserScreenCapture: string;
+};
+
 const desktopApi = {
   getDisplays,
   captureDisplay,
@@ -69,6 +91,36 @@ const desktopApi = {
   },
   cancelCapture() {
     ipcRenderer.send('overlay:cancel');
+  },
+  /** Title-bar [X] or toolbar ✕ — honors closeButtonAction pref. */
+  closeEditorWindow() {
+    ipcRenderer.send('desktop:closeEditor');
+  },
+  async getCapturePrefs(): Promise<CaptureAppPrefsBridge> {
+    return await ipcRenderer.invoke('desktop:getCapturePrefs');
+  },
+  async setCapturePrefs(partial: Partial<CaptureAppPrefsBridge>): Promise<CaptureAppPrefsBridge> {
+    return await ipcRenderer.invoke('desktop:setCapturePrefs', partial);
+  },
+  onCapturePrefsChanged(cb: (prefs: CaptureAppPrefsBridge) => void) {
+    const handler = (_evt: unknown, payload: CaptureAppPrefsBridge) => cb(payload);
+    ipcRenderer.on('desktop:capturePrefsChanged', handler);
+    return () => ipcRenderer.removeListener('desktop:capturePrefsChanged', handler);
+  },
+  completePluginShot(params: { dataUrl: string }) {
+    ipcRenderer.send('desktop:completePluginShot', params);
+  },
+  cancelPluginShot() {
+    ipcRenderer.send('desktop:cancelPluginShot');
+  },
+  showPluginShotWindow() {
+    ipcRenderer.send('desktop:showPluginShotWindow');
+  },
+  setCaptureShortcutsSuspended(payload: { suspended: boolean }) {
+    ipcRenderer.send('desktop:setCaptureShortcutsSuspended', payload);
+  },
+  async pickDefaultSaveFolder(): Promise<{ ok: false } | { ok: true; path: string }> {
+    return await ipcRenderer.invoke('desktop:pickDefaultSaveFolder');
   },
   auth: {
     getSession() {
@@ -95,15 +147,53 @@ const desktopApi = {
   setAuthGatePassed(passed: boolean) {
     ipcRenderer.send('auth:gate', { passed: !!passed });
   },
-  async saveFile(params: { dataUrl: string; format: 'png' | 'jpeg' | 'webp' }) {
-    // Keep payload as dataUrl; main will write bytes.
+  async saveFile(params: {
+    dataUrl: string;
+    format: 'png' | 'jpeg' | 'webp';
+    /** When true, write to default folder without save dialog (editor:saveFileAuto). */
+    auto?: boolean;
+    defaultSaveDir?: string;
+    saveFilenamePattern?: string;
+    saveFilenameNextNumber?: number;
+  }) {
+    if (params.auto) {
+      return await ipcRenderer.invoke('editor:saveFileAuto', params);
+    }
     return await ipcRenderer.invoke('editor:saveFile', params);
+  },
+  async saveFileAuto(params: {
+    dataUrl: string;
+    format: 'png' | 'jpeg' | 'webp';
+    defaultSaveDir?: string;
+    saveFilenamePattern?: string;
+    saveFilenameNextNumber?: number;
+  }) {
+    return await ipcRenderer.invoke('editor:saveFileAuto', params);
+  },
+  /** Escape hatch when desktopApi is missing newer methods after preload hot-reload. */
+  async invoke(channel: string, payload?: unknown) {
+    return await ipcRenderer.invoke(channel, payload);
   },
   async copyClipboard(params: { dataUrl: string }) {
     return await ipcRenderer.invoke('editor:copyClipboard', params);
   },
+  async readClipboardImage() {
+    return await ipcRenderer.invoke('editor:readClipboardImage');
+  },
+  async getScreenCaptureSource(params?: { displayId?: number }) {
+    return await ipcRenderer.invoke('desktop:getScreenCaptureSource', params ?? {});
+  },
+  async getPluginShotWorkAreaSnapshot() {
+    return await ipcRenderer.invoke('desktop:getPluginShotWorkAreaSnapshot');
+  },
   async openImageFile() {
     return await ipcRenderer.invoke('editor:openFile');
+  },
+  async openImageFiles() {
+    return await ipcRenderer.invoke('editor:openImageFiles');
+  },
+  async readImageFile(params: { path: string }) {
+    return await ipcRenderer.invoke('editor:readImageFile', params);
   },
   parseDataUrl
 };

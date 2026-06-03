@@ -7,6 +7,7 @@
   "types": "./src/index.ts",
   "dependencies": {
     "@screenshot/editor-core": "0.1.0",
+    "js-web-screen-shot": "^2.0.2",
     "konva": "^9.3.18",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
@@ -16,4 +17,3 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   }
 }
-

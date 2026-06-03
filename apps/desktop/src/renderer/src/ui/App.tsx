@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { OverlayScreen } from './OverlayScreen.js';
 import { EditorScreen } from './EditorScreen.js';
+import { PluginShotScreen } from './PluginShotScreen.js';
 
 function parseHash() {
   const hash = window.location.hash || '#/editor';
@@ -25,6 +26,9 @@ export function App() {
 
   if (route.path.startsWith('/overlay')) {
     return <OverlayScreen displayId={displayId ?? 0} />;
+  }
+  if (route.path.startsWith('/plugin-shot')) {
+    return <PluginShotScreen />;
   }
   return <EditorScreen />;
 }

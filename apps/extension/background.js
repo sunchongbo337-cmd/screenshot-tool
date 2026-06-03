@@ -1,119 +1,263 @@
-const OFFSCREEN_URL = chrome.runtime.getURL("offscreen.html");
+const CAPTURE_PAGE_BASE = chrome.runtime.getURL('capture.html');
+const PENDING_STREAM_KEY = 'sshotPendingStreamId';
 
-let captureTarget = { tabId: null, windowId: null };
+function isRestrictedUrl(url) {
+  if (!url) return true;
+  const lower = url.toLowerCase();
+  return (
+    lower.startsWith('chrome://') ||
+    lower.startsWith('chrome-extension://') ||
+    lower.startsWith('chrome-search://') ||
+    lower.startsWith('edge://') ||
+    lower.startsWith('about:') ||
+    lower.startsWith('devtools://') ||
+    lower.startsWith('view-source:')
+  );
+}
 
-async function ensureOffscreen() {
-  // Chrome/Edge MV3 offscreen document
-  const has = await chrome.offscreen.hasDocument?.();
-  if (has) return;
-  await chrome.offscreen.createDocument({
-    url: OFFSCREEN_URL,
-    reasons: ["USER_MEDIA", "DISPLAY_MEDIA"],
-    justification: "Capture screen frames for Alt+A screenshot."
+function isCapturableUrl(url) {
+  if (!url || isRestrictedUrl(url)) return false;
+  const lower = url.toLowerCase();
+  return (
+    lower.startsWith('http://') ||
+    lower.startsWith('https://') ||
+    lower.startsWith('file://') ||
+    lower.startsWith('ftp://')
+  );
+}
+
+async function setBadge(text, color) {
+  try {
+    await chrome.action.setBadgeText({ text });
+    if (color) await chrome.action.setBadgeBackgroundColor({ color });
+  } catch {
+    // ignore
+  }
+}
+
+function waitTabComplete(tabId, timeoutMs = 12000) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      resolve(false);
+    }, timeoutMs);
+
+    const onUpdated = (updatedId, info) => {
+      if (updatedId !== tabId) return;
+      if (info.status === 'complete') {
+        clearTimeout(timer);
+        chrome.tabs.onUpdated.removeListener(onUpdated);
+        resolve(true);
+      }
+    };
+
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    chrome.tabs.get(tabId).then((tab) => {
+      if (tab?.status === 'complete') {
+        clearTimeout(timer);
+        chrome.tabs.onUpdated.removeListener(onUpdated);
+        resolve(true);
+      }
+    });
   });
 }
 
-async function getActiveTab() {
-  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  return tab ?? null;
+async function pingTab(tabId) {
+  try {
+    const resp = await chrome.tabs.sendMessage(tabId, { type: 'PING' });
+    return resp?.ok === true;
+  } catch {
+    return false;
+  }
 }
 
-async function sendToTab(tabId, payload) {
+async function ensureContentScript(tabId) {
+  if (await pingTab(tabId)) return true;
   try {
-    await chrome.tabs.sendMessage(tabId, payload);
-    return true;
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: false },
+      files: ['content.js']
+    });
+    return await pingTab(tabId);
+  } catch (e) {
+    console.warn('[sshot] inject content.js failed', e);
+    return false;
+  }
+}
+
+async function sendCaptureMessage(tabId, payload) {
+  try {
+    const resp = await chrome.tabs.sendMessage(tabId, payload);
+    return resp?.ok === true;
   } catch {
-    try {
-      await chrome.scripting.executeScript({
-        target: { tabId },
-        files: ["content.js"]
-      });
-      await chrome.tabs.sendMessage(tabId, payload);
+    return false;
+  }
+}
+
+async function startCaptureOnTab(tabId, options = {}) {
+  if (!(await ensureContentScript(tabId))) return false;
+
+  if (options.streamId) {
+    if (await sendCaptureMessage(tabId, { type: 'CAPTURE_STREAM_ID', streamId: options.streamId })) {
       return true;
-    } catch (e) {
-      console.warn("sendToTab failed", e);
-      return false;
     }
   }
+
+  try {
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: false },
+      world: 'ISOLATED',
+      func: (streamId) => {
+        if (streamId && typeof globalThis.__sshotStartCaptureWithStreamId === 'function') {
+          globalThis.__sshotStartCaptureWithStreamId(streamId);
+          return 'stream-started';
+        }
+        const start = globalThis.__sshotStartCapture;
+        if (typeof start !== 'function') return 'missing';
+        start();
+        return 'started';
+      },
+      args: [options.streamId ?? null]
+    });
+    const status = result?.result;
+    if (status === 'started' || status === 'stream-started') return true;
+    console.warn('[sshot] capture hook not ready:', status);
+  } catch (e) {
+    console.warn('[sshot] executeScript (ISOLATED) failed', e);
+  }
+
+  if (options.streamId) {
+    return sendCaptureMessage(tabId, { type: 'CAPTURE_STREAM_ID', streamId: options.streamId });
+  }
+
+  return sendCaptureMessage(tabId, { type: 'CAPTURE_REQUEST' });
 }
 
-async function triggerCapture() {
-  const tab = await getActiveTab();
-  captureTarget = { tabId: tab?.id ?? null, windowId: tab?.windowId ?? null };
+async function ensureCaptureTab({ activate = true, reason = 'restricted' } = {}) {
+  const url = `${CAPTURE_PAGE_BASE}?reason=${encodeURIComponent(reason)}`;
+  const existing = await chrome.tabs.query({ url: `${CAPTURE_PAGE_BASE}*` });
+  let tabId;
 
-  // If the browser window is covered by other apps, bring it to front
-  // so injected overlay can be interacted with.
-  try {
-    if (captureTarget.windowId != null) await chrome.windows.update(captureTarget.windowId, { focused: true });
-    if (captureTarget.tabId != null) await chrome.tabs.update(captureTarget.tabId, { active: true });
-  } catch {}
-
-  // Prefer capture inside the page context (more compatible with some browsers like 360).
-  if (tab?.id) {
-    const ok = await sendToTab(tab.id, { type: "CAPTURE_REQUEST" });
-    if (ok) return;
+  if (existing[0]?.id) {
+    tabId = existing[0].id;
+    await chrome.tabs.update(tabId, { url, active: activate });
+  } else {
+    const created = await chrome.tabs.create({ url, active: activate });
+    tabId = created.id;
   }
 
-  // Fallback to offscreen capture.
-  await ensureOffscreen();
-  chrome.runtime.sendMessage({ type: "OFFSCREEN_CAPTURE_REQUEST" });
+  if (!tabId) return null;
+  await waitTabComplete(tabId);
+  return tabId;
 }
 
-chrome.commands.onCommand.addListener(async (command) => {
-  if (command !== "capture") return;
+async function storePendingStreamId(streamId) {
   try {
-    await triggerCapture();
-  } catch (e) {
-    console.warn("Failed to start capture", e);
-    const tab = await getActiveTab();
-    if (tab?.id) await sendToTab(tab.id, { type: "SCREENSHOT_ERROR", message: String(e?.message ?? e) });
+    await chrome.storage.session.set({ [PENDING_STREAM_KEY]: streamId });
+  } catch {
+    // ignore
   }
+}
+
+async function openExtensionCapturePageFallback(reason = 'restricted') {
+  const tabId = await ensureCaptureTab({ activate: true, reason });
+  if (!tabId) return false;
+  return startCaptureOnTab(tabId);
+}
+
+function chooseDesktopStream(tab) {
+  return new Promise((resolve) => {
+    if (!chrome.desktopCapture?.chooseDesktopMedia) {
+      resolve(null);
+      return;
+    }
+    try {
+      chrome.desktopCapture.chooseDesktopMedia(['screen', 'window', 'tab'], tab, (streamId) => {
+        if (chrome.runtime.lastError) {
+          console.warn('[sshot] desktopCapture error', chrome.runtime.lastError.message);
+          resolve(null);
+          return;
+        }
+        resolve(streamId || null);
+      });
+    } catch (e) {
+      console.warn('[sshot] desktopCapture threw', e);
+      resolve(null);
+    }
+  });
+}
+
+/** Open extension capture hub (capture.html) — user picks share target from the page button. */
+async function openCaptureHub(reason = 'hub') {
+  const tabId = await ensureCaptureTab({ activate: true, reason });
+  if (!tabId) return false;
+  return ensureContentScript(tabId);
+}
+
+function triggerCapture() {
+  void setBadge('', undefined);
+  void openCaptureHub('hub').then((ok) => {
+    if (!ok) void setBadge('!', '#b42828');
+  });
+}
+
+chrome.commands.onCommand.addListener((command) => {
+  if (command !== 'capture') return;
+  triggerCapture();
 });
 
-chrome.action.onClicked.addListener(async () => {
+chrome.action.onClicked.addListener(() => {
+  triggerCapture();
+});
+
+function dataUrlToBlob(dataUrl) {
+  const raw = String(dataUrl ?? '').trim();
+  if (!raw) return null;
+  const normalized = raw.startsWith('data:')
+    ? raw
+    : raw.startsWith('base64,')
+      ? `data:image/png;base64,${raw.replace(/^base64,/i, '')}`
+      : `data:image/png;base64,${raw}`;
+  const comma = normalized.indexOf(',');
+  if (comma < 0) return null;
+  const b64 = normalized.slice(comma + 1).trim();
+  if (!b64) return null;
   try {
-    await triggerCapture();
-  } catch (e) {
-    console.warn("Action trigger failed", e);
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return new Blob([bytes], { type: 'image/png' });
+  } catch {
+    return null;
+  }
+}
+
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.type === 'CLIPBOARD_IMAGE') {
+    void (async () => {
+      try {
+        const blob = dataUrlToBlob(msg.dataUrl);
+        if (!blob || blob.size < 1024) {
+          sendResponse({ ok: false, error: '无效的图片数据' });
+          return;
+        }
+        await navigator.clipboard.write([
+          new ClipboardItem({
+            'image/png': Promise.resolve(blob)
+          })
+        ]);
+        sendResponse({ ok: true });
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        console.warn('[sshot] clipboard write failed', message);
+        sendResponse({ ok: false, error: message });
+      }
+    })();
+    return true;
+  }
+
+  if (msg?.type === 'SCREENSHOT_ERROR') {
+    console.warn('[sshot]', msg?.source ?? 'unknown', msg?.name, msg?.message);
+    void setBadge('!', '#b42828');
   }
 });
-
-chrome.runtime.onMessage.addListener((msg, _sender, _sendResponse) => {
-  if (msg?.type === "OFFSCREEN_CAPTURE_RESULT") {
-    (async () => {
-      const tabId = captureTarget?.tabId ?? (await getActiveTab())?.id;
-      if (!tabId) return;
-      await sendToTab(tabId, { type: "SCREENSHOT_FRAME", dataUrl: msg.dataUrl });
-    })();
-    return;
-  }
-  if (msg?.type === "OFFSCREEN_CAPTURE_ERROR") {
-    (async () => {
-      const tabId = captureTarget?.tabId ?? (await getActiveTab())?.id;
-      if (!tabId) return;
-      await sendToTab(tabId, {
-        type: "SCREENSHOT_ERROR",
-        message: msg.message ?? "capture failed",
-        name: msg.name,
-        source: msg.source ?? "offscreen"
-      });
-    })();
-    return;
-  }
-
-  // Forward errors from content-script captures back to the tab.
-  if (msg?.type === "SCREENSHOT_ERROR") {
-    (async () => {
-      const tabId = captureTarget?.tabId ?? (await getActiveTab())?.id;
-      if (!tabId) return;
-      await sendToTab(tabId, {
-        type: "SCREENSHOT_ERROR",
-        message: msg.message ?? "capture failed",
-        name: msg.name,
-        source: msg.source
-      });
-    })();
-    return;
-  }
-});
-

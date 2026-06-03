@@ -1,0 +1,53 @@
+.textFmtRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.textFmtBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  height: 32px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.06);
+  color: #e7eaf0;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.textFmtBtn:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.textFmtBtn.active {
+  border-color: rgba(76, 159, 254, 0.85);
+  background: rgba(76, 159, 254, 0.22);
+  color: #fff;
+}
+
+.textFmtBtn em {
+  font-style: italic;
+  font-weight: 600;
+}
+
+.textFmtBtnUnderline span {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.textFmtSep {
+  width: 1px;
+  height: 20px;
+  margin: 0 4px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.textFontSelect option {
+  font-size: 13px;
+}

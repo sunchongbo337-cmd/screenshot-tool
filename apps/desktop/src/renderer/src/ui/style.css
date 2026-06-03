@@ -12,6 +12,13 @@ body,
   font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
 }
 
+html.plugin-shot-mode,
+html.plugin-shot-mode body,
+html.plugin-shot-mode #root {
+  background: transparent !important;
+  overflow: hidden;
+}
+
 .page {
   height: 100%;
   min-height: 100vh;
@@ -105,6 +112,34 @@ body,
   overflow: hidden;
 }
 
+.pageSettingsBtn {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  z-index: 100;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(16, 18, 25, 0.92);
+  color: #e7eaf0;
+  font-size: 13px;
+  cursor: pointer;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.pageSettingsBtn:hover {
+  background: rgba(28, 32, 44, 0.96);
+  border-color: rgba(76, 159, 254, 0.55);
+}
+
+.pageSettingsBtn.active {
+  border-color: rgba(76, 159, 254, 0.85);
+  background: rgba(76, 159, 254, 0.18);
+}
+
 .topbar {
   display: flex;
   gap: 12px;
@@ -140,6 +175,189 @@ body,
   user-select: none;
 }
 
+.fscSettingsOverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: grid;
+  place-items: center;
+  z-index: 9998;
+  padding: 16px;
+}
+
+.fscSettingsDialog {
+  width: min(640px, 100%);
+  max-height: min(560px, 88vh);
+  display: flex;
+  flex-direction: column;
+  border-radius: 8px;
+  background: #1a1d26;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+  color: #e7eaf0;
+  overflow: hidden;
+}
+
+.fscSettingsTitle {
+  margin: 0;
+  padding: 12px 16px 0;
+  font-size: 15px;
+  font-weight: 600;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding-bottom: 10px;
+}
+
+.fscSettingsTabs {
+  display: flex;
+  flex-wrap: wrap;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.2);
+  padding: 0 4px;
+}
+
+.fscSettingsTab {
+  padding: 10px 14px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: rgba(231, 234, 240, 0.82);
+  font-size: 13px;
+  cursor: pointer;
+  margin-bottom: -1px;
+}
+
+.fscSettingsTab:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.fscSettingsTab.active {
+  color: #fff;
+  border-bottom-color: #4c9ffe;
+  background: rgba(76, 159, 254, 0.08);
+}
+
+.fscSettingsBody {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px 16px;
+}
+
+.fscSettingsSection {
+  display: grid;
+  gap: 12px;
+}
+
+.fscSettingsSectionEditor {
+  gap: 10px;
+}
+
+.fscSettingsNote {
+  margin: 0;
+  font-size: 12px;
+  opacity: 0.72;
+  line-height: 1.45;
+}
+
+.fscCheckRow {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.fscCheckRow input {
+  margin-top: 3px;
+  flex-shrink: 0;
+}
+
+.fscFieldRow {
+  display: grid;
+  grid-template-columns: minmax(120px, 42%) 1fr;
+  gap: 10px 12px;
+  align-items: start;
+  font-size: 13px;
+}
+
+.fscFieldLabel {
+  opacity: 0.88;
+  padding-top: 7px;
+}
+
+.fscFieldControl {
+  min-width: 0;
+}
+
+.fscHotkeyTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.fscHotkeyTable th,
+.fscHotkeyTable td {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.fscHotkeyTable th {
+  background: rgba(255, 255, 255, 0.06);
+  font-weight: 600;
+}
+
+.fscHotkeyTable kbd {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(0, 0, 0, 0.35);
+  font-size: 12px;
+}
+
+.fscSettingsFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.15);
+}
+
+.fscSettingsBtn {
+  padding: 6px 16px;
+  min-width: 72px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.08);
+  color: #e7eaf0;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.fscSettingsBtn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.fscSettingsBtn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.fscSettingsBtnPrimary {
+  border-color: rgba(76, 159, 254, 0.85);
+  background: #4c9ffe;
+  color: #0b1120;
+  font-weight: 600;
+}
+
+.fscSettingsBtnPrimary:hover {
+  background: #6ab0ff;
+}
+
 .iconBtn {
   appearance: none;
   border: 1px solid transparent;
@@ -169,6 +387,17 @@ body,
 .iconBtn.active {
   border-color: rgba(76, 159, 254, 0.8);
   background: rgba(76, 159, 254, 0.18);
+}
+
+.iconBtn.menuOpen {
+  border-color: rgba(76, 159, 254, 0.95);
+  background: rgba(76, 159, 254, 0.22);
+  box-shadow: 0 0 0 2px rgba(76, 159, 254, 0.18);
+}
+
+.iconBtn.toolActive {
+  border-color: rgba(76, 159, 254, 0.85);
+  background: rgba(76, 159, 254, 0.12);
 }
 
 .iconBtn.hint {
@@ -343,6 +572,79 @@ details.menu > summary::-webkit-details-marker {
   flex-wrap: wrap;
 }
 
+.paramStack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.paramLabel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11px;
+  opacity: 0.82;
+}
+
+.paramLabel span:last-child {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.95;
+}
+
+input.paramSlider[type='range'] {
+  width: 100%;
+  height: 6px;
+  margin: 4px 0 2px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+  accent-color: #4c9ffe;
+}
+
+input.paramSlider[type='range']::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+input.paramSlider[type='range']::-webkit-slider-thumb {
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -5px;
+  border-radius: 50%;
+  background: #4c9ffe;
+  border: 2px solid rgba(15, 23, 42, 0.95);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+
+input.paramSlider[type='range']::-moz-range-track {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+input.paramSlider[type='range']::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #4c9ffe;
+  border: 2px solid rgba(15, 23, 42, 0.95);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+
+.captureBar .menuPanel input.paramSlider[type='range']::-webkit-slider-runnable-track {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.captureBar .menuPanel input.paramSlider[type='range']::-moz-range-track {
+  background: rgba(255, 255, 255, 0.22);
+}
+
 .brushSizeRow {
   align-items: center;
   gap: 10px;
@@ -417,3 +719,592 @@ summary::-webkit-details-marker {
   display: none;
 }
 
+/* ── Level-1 workspace UI ── */
+.workspaceLayout {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-self: stretch;
+}
+
+.workspaceTop {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(16, 18, 25, 0.92);
+  z-index: 2;
+}
+
+.workspaceToolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 4px 6px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.94);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+  color: #111;
+}
+
+.workspaceToolBtn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 52px;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: #111;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.workspaceToolBtn:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.06);
+  border-color: rgba(0, 0, 0, 0.08);
+}
+
+.workspaceToolBtn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.workspaceToolIcon {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.workspaceToolLabel {
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
+.workspaceToolSep {
+  width: 1px;
+  height: 36px;
+  background: rgba(0, 0, 0, 0.12);
+  margin: 0 2px;
+  align-self: center;
+}
+
+.workspaceTabStrip {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 0 8px;
+  min-height: 34px;
+  overflow-x: auto;
+  background: rgba(12, 14, 20, 0.6);
+}
+
+.workspaceTab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: rgba(231, 234, 240, 0.75);
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.workspaceTab:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.workspaceTab--active {
+  color: #fff;
+  border-bottom-color: #4c9ffe;
+  background: rgba(76, 159, 254, 0.1);
+}
+
+.workspaceTabDiamond {
+  width: 8px;
+  height: 8px;
+  background: #4c9ffe;
+  transform: rotate(45deg);
+  flex-shrink: 0;
+}
+
+.workspaceTabClose {
+  margin-left: 2px;
+  opacity: 0.6;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.workspaceTabClose:hover {
+  opacity: 1;
+}
+
+.workspaceTabAdd {
+  min-width: 32px;
+  border: none;
+  background: transparent;
+  color: rgba(231, 234, 240, 0.8);
+  font-size: 18px;
+  cursor: pointer;
+}
+
+.workspaceTabAdd:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.workspaceViewer {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  overflow: auto;
+  display: block;
+  padding: 24px;
+  box-sizing: border-box;
+}
+
+.workspaceViewer--empty {
+  display: grid;
+  place-items: center;
+  color: rgba(231, 234, 240, 0.6);
+  font-size: 14px;
+}
+
+.workspaceViewer--pasteAdjust {
+  overflow: hidden;
+}
+
+.workspaceViewerInner {
+  margin: 0 auto;
+  max-width: none;
+  position: relative;
+}
+
+.workspacePasteOverlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.workspacePasteLayer {
+  pointer-events: auto;
+}
+
+.workspacePasteBar {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: rgba(26, 29, 38, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+.workspacePasteBarHint {
+  font-size: 13px;
+  color: rgba(231, 234, 240, 0.85);
+  white-space: nowrap;
+}
+
+.workspacePasteBarActions {
+  display: flex;
+  gap: 8px;
+}
+
+@media (max-width: 640px) {
+  .workspacePasteBar {
+    flex-direction: column;
+    align-items: stretch;
+    width: min(360px, calc(100vw - 32px));
+  }
+
+  .workspacePasteBarHint {
+    white-space: normal;
+    text-align: center;
+  }
+}
+
+.workspaceViewerImg {
+  display: block;
+  max-width: none;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  border-radius: 4px;
+}
+
+.resizeDialog .resizeInfoTable {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 16px;
+  font-size: 13px;
+}
+
+.resizeDialog .resizeInfoTable th,
+.resizeDialog .resizeInfoTable td {
+  padding: 6px 8px;
+  text-align: left;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.resizeDialog .resizeModeBlock {
+  margin-bottom: 12px;
+}
+
+.resizeDialog .resizeFieldRow {
+  display: flex;
+  gap: 16px;
+  margin: 8px 0 0 24px;
+}
+
+.resizeDialog .resizeFieldRow label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.resizeDialog .resizeFieldRow input[type='number'] {
+  width: 100px;
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.06);
+  color: #e7eaf0;
+  padding: 0 8px;
+}
+
+.fscCheckRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.fscSettingsHeader {
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.fscSettingsFooter {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.fscSettingsBtn {
+  padding: 8px 16px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.06);
+  color: #e7eaf0;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.fscSettingsBtn.primary {
+  border-color: rgba(76, 159, 254, 0.7);
+  background: rgba(76, 159, 254, 0.2);
+}
+
+.fscSettingsBtn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.workspaceStage {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.workspaceArrowNavBtn {
+  position: fixed;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 44px;
+  height: 44px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(16, 18, 25, 0.72);
+  color: #fff;
+  font-size: 20px;
+  z-index: 50;
+  cursor: pointer;
+}
+
+.workspaceArrowNavBtn:disabled {
+  opacity: 0.35;
+  pointer-events: none;
+  cursor: not-allowed;
+}
+
+.workspaceArrowNavBtn--prev {
+  left: 14px;
+}
+
+.workspaceArrowNavBtn--next {
+  right: 14px;
+}
+
+.workspaceArrowNavBar {
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  background: rgba(16, 18, 25, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: #fff;
+  font-size: 12px;
+  z-index: 50;
+  max-width: 80%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.workspaceArrowNavAdd {
+  border: none;
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.workspaceToolBtn--active {
+  border-color: rgba(76, 159, 254, 0.75);
+  background: rgba(76, 159, 254, 0.12);
+}
+
+.workspaceZoomMenu {
+  position: relative;
+}
+
+.workspaceZoomSummary {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 52px;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: #111;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.workspaceZoomSummary::-webkit-details-marker {
+  display: none;
+}
+
+.workspaceZoomMenu[open] .workspaceZoomSummary,
+.workspaceZoomSummary:hover {
+  background: rgba(0, 0, 0, 0.06);
+  border-color: rgba(0, 0, 0, 0.08);
+}
+
+.workspaceZoomPanel {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(64px, 1fr));
+  gap: 4px;
+  padding: 8px;
+  border-radius: 10px;
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+  min-width: 220px;
+}
+
+.workspaceZoomOption {
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.03);
+  color: #111;
+  font-size: 12px;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+
+.workspaceZoomOption:hover {
+  background: rgba(76, 159, 254, 0.12);
+}
+
+.workspaceZoomOption.active {
+  border-color: rgba(76, 159, 254, 0.75);
+  background: rgba(76, 159, 254, 0.16);
+}
+
+.pasteLayerDialog .pasteLayerBody {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.pasteLayerHint {
+  margin: 0;
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+.pasteLayerPreviewHost {
+  position: relative;
+  margin: 0 auto;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: #0b0f17;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+
+.pasteLayerPreviewBase {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  pointer-events: none;
+}
+
+.pasteLayerOverlay {
+  position: absolute;
+  border: 2px solid #4c9ffe;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+  cursor: move;
+  touch-action: none;
+}
+
+.pasteLayerOverlayClip {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.pasteLayerOverlayClip img {
+  display: block;
+  max-width: none;
+}
+
+.pasteLayerResizeHandle {
+  position: absolute;
+  right: -6px;
+  bottom: -6px;
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  background: #4c9ffe;
+  border: 1px solid #fff;
+  cursor: nwse-resize;
+}
+
+.pasteLayerFields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.pasteLayerFieldGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pasteLayerGroupTitle {
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.85;
+}
+
+.pasteLayerFieldRow {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.pasteLayerFieldRow label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+}
+
+.pasteLayerFieldRow input[type='number'] {
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.06);
+  color: #e7eaf0;
+  padding: 0 8px;
+}
+
+.pasteLayerCropPreview {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: #0b0f17;
+}
+
+.pasteLayerCropImg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+}
+
+.pasteLayerCropRect {
+  position: absolute;
+  border: 2px solid #ffb020;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+}
+
+.pasteLayerCropActions {
+  display: flex;
+  gap: 8px;
+}
+
+@media (max-width: 640px) {
+  .pasteLayerFields {
+    grid-template-columns: 1fr;
+  }
+}
+
+.workspaceArrowNavAdd:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
