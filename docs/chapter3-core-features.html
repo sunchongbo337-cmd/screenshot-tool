@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>第3章 核心功能配图 — 图+代码说明</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    body { font-family: "Microsoft YaHei", sans-serif; margin: 0; padding: 24px; background: #f0f0f0; }
+    h1 { text-align: center; font-size: 20px; }
+    .note { text-align: center; color: #666; font-size: 13px; margin-bottom: 24px; }
+    section { background: #fff; border-radius: 8px; padding: 20px 28px; margin-bottom: 28px; box-shadow: 0 1px 6px rgba(0,0,0,.08); }
+    h2 { font-size: 16px; color: #1565c0; border-bottom: 2px solid #1565c0; padding-bottom: 6px; }
+    p.desc, pre.code { font-size: 13px; color: #333; line-height: 1.65; }
+    pre.code { background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px; padding: 12px 16px; overflow-x: auto; white-space: pre-wrap; }
+    .tag { display: inline-block; background: #e3f2fd; color: #1565c0; font-size: 12px; padding: 2px 8px; border-radius: 4px; margin-right: 6px; }
+    @media print { body { background: #fff; } section { break-inside: avoid; } }
+  </style>
+</head>
+<body>
+  <h1>第 3.3 节 核心功能 — 配图集（图 + 代码对照）</h1>
+  <p class="note">每张图下方标注对应源码文件，截图插入报告时图与代码相邻排版</p>
+
+  <!-- 自动保存命名 -->
+  <section id="autosave">
+    <h2>图 3-8 自动保存与命名规则流程图</h2>
+    <p class="desc">
+      <span class="tag">新增功能</span>
+      用户在设置中开启「自动保存」并配置文件名模式（支持 <code>{date}</code> <code>{time}</code> <code>{timestamp}</code> <code>{n}</code>）。
+      保存时 Renderer 判断 <code>autoSaveImages</code>，走 IPC <code>editor:saveFileAuto</code>，Main 进程按模式生成文件名并递增序号。
+    </p>
+    <pre class="mermaid">
+flowchart TD
+  A([用户点击保存/完成]) --> B{autoSaveImages?}
+  B -- 否 --> C[弹出另存为对话框]
+  B -- 是 --> D{defaultSaveDir 有效?}
+  D -- 否 --> E[Toast 提示设置文件夹]
+  D -- 是 --> F[exportCurrentDataUrl 导出 PNG]
+  F --> G["IPC editor:saveFileAuto"]
+  G --> H["buildSaveDefaultFilename(pattern, ext, seq)"]
+  H --> I["writeFile → 默认目录"]
+  I --> J{pattern 含 n/seq?}
+  J -- 是 --> K["saveFilenameNextNumber + 1"]
+  J -- 否 --> L([Toast: 已自动保存])
+  K --> L
+    </pre>
+    <pre class="code">// ① 文件名预览 — packages/editor-react/src/settings/EditorSettingsDialog.tsx
+export function previewSaveFilename(pattern: string, seqNumber = 1): string {
+  return pattern
+    .replace(/\{timestamp\}/g, String(Date.now()))
+    .replace(/\{date\}/g, date).replace(/\{time\}/g, time)
+    .replace(/\{n\}/g, String(seq)).replace(/\{seq\}/g, String(seq)) + '.png';
+}
+
+// ② Renderer 触发自动保存 — apps/desktop/.../EditorScreen.tsx
+const useAutoSave = !opts?.forceDialog && !!capturePrefs.autoSaveImages;
+if (useAutoSave) {
+  r = await api.saveFileAuto({ dataUrl, format, defaultSaveDir, saveFilenamePattern, saveFilenameNextNumber });
+}
+
+// ③ Main 写盘 — apps/desktop/src/main/index.ts
+const filename = buildSaveDefaultFilename(prefs.saveFilenamePattern, ext, prefs.saveFilenameNextNumber);
+await writeFile(join(dir, filename), buffer);
+const bumped = await bumpSaveFilenameSequenceIfNeeded(app, prefs);</pre>
+  </section>
+
+  <!-- 浏览器插件 -->
+  <section id="web-plugin">
+    <h2>图 3-9 浏览器 Web 插件集成架构图</h2>
+    <p class="desc">
+      <span class="tag">web-plugin</span>
+      第三方页面通过 UMD <code>screenShotPlugin.umd.js</code> 或 ESM 引入，调用 <code>createEditor()</code> 挂载到 DOM 容器。
+      内部渲染与桌面端相同的 <code>EditorWidget</code>，对外暴露 setTool / undo / export / selectMosaicsSameRow 等完整 API。
+    </p>
+    <pre class="mermaid">
+flowchart LR
+  subgraph Host["宿主网页"]
+    DIV["&lt;div id='editor'&gt;"]
+    SCRIPT["script src=screenShotPlugin.umd.js"]
+  end
+  subgraph Plugin["packages/web-plugin"]
+    CE["createEditor(params)"]
+    NW["normalizeImage(base64/url/file)"]
+    EW["EditorWidget (editor-react)"]
+  end
+  subgraph Core["editor-core"]
+    DOC["document / history / export"]
+  end
+  SCRIPT --> CE
+  DIV --> CE
+  CE --> NW --> EW
+  EW --> DOC
+  CE --> API["EditorInstance API\nsetTool · undo · export\nselectMosaicsSameRow · ..."]
+    </pre>
+    <pre class="code">// packages/web-plugin/src/index.ts
+export function createEditor(params: CreateEditorParams): EditorInstance {
+  const root = createRoot(params.container);
+  const handleRef = React.createRef&lt;EditorWidgetHandle&gt;();
+  root.render(React.createElement(EditorWidget, { ref: handleRef, image, options }));
+  return {
+    setTool: (t) => handleRef.current?.setTool(t),
+    selectMosaicsSameRow: () => handleRef.current!.selectMosaicsSameRow(),
+    export: (o) => handleRef.current!.export(o),
+    destroy: () => { handleRef.current?.destroy(); root.unmount(); }
+  };
+}
+
+// 宿主调用示例
+const editor = createEditor({
+  container: document.getElementById('editor'),
+  image: { kind: 'base64', base64: dataUrl }
+});
+editor.setTool('mosaic');
+editor.export({ format: 'png' });</pre>
+  </section>
+
+  <!-- 图层 -->
+  <section id="layers">
+    <h2>图 3-10 箭头/文字与马赛克分层渲染模型</h2>
+    <p class="desc">
+      Konva Stage 自下而上：<strong>背景图 → base 层箭头/文字（被马赛克覆盖后锁定）→ 马赛克层 → top 层箭头/文字（可编辑）</strong>。
+      当新马赛克覆盖已有箭头/文字时，<code>splitNodeByRegion</code> 将节点拆为 base（重叠区，locked）与 top（剩余可见区）两段。
+    </p>
+    <pre class="mermaid">
+flowchart BT
+  subgraph Stage["Konva Stage 渲染顺序（自下而上）"]
+    BG["① 背景图片 Group"]
+    BASE["② base 层 arrow/text\nlocked=true, clipRects"]
+    MOS["③ mosaicRect / mosaicStroke\n按 updatedAt 叠放"]
+    TOP["④ top 层 arrow/text\nlocked=false, 可编辑"]
+  end
+  BG --> BASE --> MOS --> TOP
+
+  subgraph Split["打码时 splitNodeByRegion"]
+    N["原始 arrow/text 节点"]
+    N --> IN["重叠区 → base+locked"]
+    N --> OUT["剩余区 → top+editable"]
+  end
+    </pre>
+    <pre class="code">// 节点 layer 字段 — packages/editor-core/src/types.ts
+export type ArrowNode = BaseNode & {
+  layer?: 'base' | 'top';  // base=马赛克下方, top=马赛克上方
+  locked?: boolean;
+  clipRects?: Array&lt;{ x,y,width,height }&gt;;
+};
+
+// 打码覆盖时拆分 — packages/editor-react/src/widget/EditorWidget.tsx
+next = addArrow(next, { ...rest, layer: 'base', locked: true, clipRects: insideRects });
+next = addArrow(next, { ...rest, layer: 'top', locked: false, clipRects: outsideRects });
+
+// Konva 渲染注释 — EditorWidget.tsx 第 3925 行
+// Render mosaics above background, but below arrow/text layer</pre>
+  </section>
+
+  <!-- 马赛克 -->
+  <section id="mosaic">
+    <h2>图 3-11 马赛克子系统处理流程图</h2>
+    <p class="desc">
+      支持<strong>矩形框选</strong>与<strong>画笔涂抹</strong>两种模式，效果分 pixel（像素化）与 blur（高斯模糊）。
+      新矩形与旧矩形重叠时 <code>carveOverlappedMosaicRects</code> 将旧块布尔减切分；同时 <code>lockNodesUnderRegion</code> 锁定被覆盖的箭头/文字。
+    </p>
+    <pre class="mermaid">
+flowchart TD
+  Start([用户框选/涂抹]) --> Mode{模式?}
+  Mode -- rect --> R1[计算选区矩形]
+  Mode -- brush --> R2[收集 points 笔迹]
+  R1 --> Carve[carveOverlappedMosaicRects 切分旧块]
+  R2 --> AddS[addMosaicStroke]
+  Carve --> Lock[lockNodesUnderRegion 锁定被盖住的标注]
+  Lock --> Split[splitNodeByRegion 拆分 arrow/text]
+  Split --> AddR[addMosaicRect]
+  AddR --> Hist[pushHistory 入撤销栈]
+  AddS --> Hist
+  Hist --> Render["Konva 按 updatedAt 叠放渲染"]
+  Render --> End([可见打码效果])
+    </pre>
+    <pre class="code">// 添加马赛克矩形 — packages/editor-core/src/document.ts
+export function addMosaicRect(doc, rect): EditorDocument {
+  const node: MosaicRectNode = { id: createId('mosaic'), kind: 'mosaicRect', ...rect };
+  return { ...doc, nodes: [...doc.nodes, node] };
+}
+
+// 重叠切分 — EditorWidget.tsx carveOverlappedMosaicRects
+const pieces = subtractRect(base, region);
+next = removeNode(next, r.id);
+next = { ...next, nodes: [...next.nodes, ...carvedPieces] };</pre>
+  </section>
+
+  <!-- 行列选择 -->
+  <section id="rowcol">
+    <h2>图 3-12 马赛克同行/同列批量选择示意图</h2>
+    <p class="desc">
+      用户选中一块马赛克后点击「同行」或「同列」，以<strong>种子块中心线</strong>为基准，
+      遍历文档中所有马赛克节点，筛选水平中线（同行）或垂直中线（同列）穿过其包围盒的块，支持多选后整体拖动。
+    </p>
+    <pre class="mermaid">
+flowchart LR
+  subgraph Grid["马赛克布局示意"]
+    direction TB
+    R1["块A"] --- R2["块B"] --- R3["块C"]
+    R4["块D"] --- R5["块E ★种子"] --- R6["块F"]
+    R7["块G"] --- R8["块H"] --- R9["块I"]
+  end
+
+  subgraph Row["同行选择 midY = seed中心Y"]
+    SEL_R["选中 B, E, F, H"]
+  end
+
+  subgraph Col["同列选择 midX = seed中心X"]
+    SEL_C["选中 D, E, G, H"]
+  end
+
+  R5 --> Row
+  R5 --> Col
+    </pre>
+    <pre class="code">// 同行算法 — EditorWidget.tsx
+function collectSameRowMosaicIds(doc, seedId): string[] {
+  const midY = b.y + b.height / 2;  // 种子水平中线
+  for (const n of doc.nodes) {
+    if (midY >= r.y && midY <= r.y + r.height) out.push(n.id);
+  }
+}
+
+// 同列算法
+function collectSameColumnMosaicIds(doc, seedId): string[] {
+  const midX = b.x + b.width / 2;   // 种子垂直中线
+  if (midX >= r.x && midX <= r.x + r.width) out.push(n.id);
+}
+
+// 对外 API — packages/web-plugin/src/index.ts
+selectMosaicsSameRow(): { ok: boolean; count: number };
+selectMosaicsSameColumn(): { ok: boolean; count: number };</pre>
+  </section>
+
+  <!-- 标注样式模板（新增） -->
+  <section id="template">
+    <h2>图 3-13 标注样式模板 CRUD 与命名解析图</h2>
+    <p class="desc">
+      <span class="tag">新增功能</span>
+      标注样式模板存储<strong>绘图参数预设</strong>（箭头颜色/粗细、文字字体/字号、马赛克块大小/效果），而非标注内容快照。
+      支持保存、重命名、删除、套用，命名规则支持 <code>{n}</code> 自动递增。
+    </p>
+    <pre class="mermaid">
+flowchart LR
+  subgraph UI["模板管理 UI"]
+    SAVE["保存当前样式"]
+    APPLY["套用模板"]
+    RENAME["重命名"]
+    DELETE["删除"]
+  end
+  subgraph Storage["packages/editor-react/src/widget/template-storage.ts"]
+    SAVE_FN["saveStyleTemplate()"]
+    LOAD_FN["loadStyleTemplate()"]
+    LIST_FN["listStyleTemplates()"]
+    DEL_FN["deleteStyleTemplate()"]
+  end
+  subgraph LS["浏览器 localStorage\nscreenshot_style_template_v1:*"]
+  end
+
+  SAVE --> SAVE_FN --> LS
+  APPLY --> LOAD_FN --> LS
+  RENAME --> LS
+  DELETE --> DEL_FN --> LS
+  LIST_FN --> LS
+
+  subgraph NameRule["命名解析规则"]
+    NR1["纯序号 {n}\n医院记录{n} → 医院记录4"]
+    NR2["自定义前缀\n会议纪要_v2"]
+    NR3["时间戳\n模板_{timestamp}"]
+  end
+
+  SAVE_FN -.-> NameRule
+    </pre>
+    <pre class="code">// 模板数据结构 — packages/editor-react/src/widget/template-storage.ts
+export type StyleTemplateV1 = {
+  version: 1;
+  name: string;
+  arrow: Partial&lt;ArrowNode&gt;;       // stroke, strokeWidth, arrowKind, ...
+  text: Partial&lt;TextNode&gt;;         // fontFamily, fontSize, fill, ...
+  mosaicRect: Partial&lt;MosaicRectNode&gt;; // pixelSize, style, blurRadius
+  mosaicStroke: Partial&lt;MosaicStrokeNode&gt;; // brushSize, pixelSize, style
+  createdAt: number;
+  updatedAt: number;
+};
+
+// 命名解析（支持 {n} 自动递增）
+export function resolveTemplateName(pattern: string, existing: string[]): string {
+  const match = pattern.match(/(.+)\{n\}$/);
+  if (match) {
+    const prefix = match[1];
+    const nums = existing
+      .map(n => n.slice(prefix.length))
+      .filter(n => /^\d+$/.test(n))
+      .map(Number);
+    let next = 1;
+    while (nums.includes(next)) next++;
+    return `${prefix}${next}`;
+  }
+  return pattern;
+}</pre>
+  </section>
+
+  <script>mermaid.initialize({ startOnLoad: true, theme: 'default', securityLevel: 'loose' });</script>
+</body>
+</html>

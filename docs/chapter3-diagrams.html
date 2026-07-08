@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>第3章 实习报告配图 — ScreenShot Tool</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    body { font-family: "Microsoft YaHei", "SimSun", sans-serif; margin: 0; padding: 24px; background: #f0f0f0; }
+    h1 { text-align: center; font-size: 20px; }
+    .note { text-align: center; color: #666; font-size: 13px; margin-bottom: 24px; }
+    section { background: #fff; border-radius: 8px; padding: 20px 28px; margin-bottom: 28px; box-shadow: 0 1px 6px rgba(0,0,0,.08); }
+    h2 { font-size: 16px; color: #1565c0; border-bottom: 2px solid #1565c0; padding-bottom: 6px; }
+    p.desc { font-size: 13px; color: #555; line-height: 1.7; }
+    .mermaid { text-align: center; }
+    @media print { body { background: #fff; } section { break-inside: avoid; box-shadow: none; border: 1px solid #ccc; } }
+  </style>
+</head>
+<body>
+  <h1>第 3 章 实习项目设计与实现 — 配图集</h1>
+  <p class="note">用浏览器打开本文件，对各图截图插入 Word；或 Ctrl+P 导出 PDF</p>
+
+  <!-- 图 3-1 -->
+  <section id="hw-topology">
+    <h2>图 3-1 系统硬件拓扑图（3.1.1 硬件拓扑设计）</h2>
+    <p class="desc">
+      本系统为单机部署架构：用户 PC 通过显示接口连接 1～N 块显示器，输入设备（键鼠）触发截图热键；
+      认证服务以进程形式监听本机 127.0.0.1:4177，数据存储于本地磁盘，截图画面不经过网络传输。
+    </p>
+    <pre class="mermaid">
+flowchart TB
+  subgraph UserSite["用户侧（办公室/个人 PC）"]
+    KB["键盘\nAlt+A / Alt+Shift+A"]
+    MS["鼠标\n区域框选"]
+    subgraph PC["用户主机 PC\nWindows 10/11 x64\nCPU≥双核 RAM≥4GB"]
+      GPU["显卡/GPU\n帧缓冲"]
+      CPU["CPU\nElectron+Chrome进程"]
+      DISK["本地磁盘\n截图保存/auth.json"]
+      subgraph Processes["运行进程"]
+        DESK["ScreenShot.exe\nElectron 桌面端"]
+        BR["Chrome/Edge 浏览器\n+ 扩展 content.js"]
+        SRV["node 认证服务\n127.0.0.1:4177"]
+      end
+    end
+    subgraph Displays["显示器组 1～N"]
+      MON1["主显示器\n1920×1080"]
+      MON2["扩展显示器\n可选"]
+    end
+  end
+
+  subgraph OptionalCloud["可选外部服务"]
+    IDP["OIDC 身份提供商\nHTTPS"]
+  end
+
+  KB --> DESK
+  MS --> DESK
+  GPU --> MON1
+  GPU --> MON2
+  MON1 -. 截图源 .-> DESK
+  MON2 -. 多屏采集 .-> DESK
+  BR --> MON1
+  DESK --> CPU
+  BR --> CPU
+  DESK --> DISK
+  SRV --> DISK
+  DESK <-->|"TCP loopback\nREST/JWT"| SRV
+  BR <-->|"TCP loopback"| SRV
+  DESK -. "HTTPS 可选" .-> IDP
+
+  style PC fill:#e3f2fd,stroke:#1565c0
+  style Displays fill:#e8f5e9,stroke:#2e7d32
+  style OptionalCloud fill:#fff3e0,stroke:#ef6c00
+    </pre>
+  </section>
+
+  <!-- 图 3-2 SS-1 -->
+  <section id="ss1-arch">
+    <h2>图 3-2 SS-1 截图采集子系统架构图（3.3.3）</h2>
+    <p class="desc">
+      SS-1 负责屏幕采集，覆盖桌面端 Overlay、浏览器绿框、扩展剪贴板三条链路。桌面端热键触发前需经过 SS-6 鉴权门控，
+      截图完成后进入 SS-2 标注子系统进行编辑。
+    </p>
+    <pre class="mermaid">
+flowchart LR
+  subgraph SS1["SS-1 截图采集"]
+    direction TB
+    A1["[全局热键 Alt+A]"]
+    A2["[鉴权门控 SS-6]"]
+    A3["[创建 Overlay 窗口]"]
+    A4["[用户拖选绿框]"]
+    A5["[desktopCapturer 截屏]"]
+    A6["[dataUrl → Renderer]"]
+    A7["[浏览器热键]"]
+    A8["[js-web-screen-shot]"]
+    A9["[扩展 Alt+Shift+A]"]
+    A10["[capture-core]"]
+    A11["[clipboard.write]"]
+  end
+
+  subgraph SS2["SS-2 标注"]
+    B1["EditorWidget"]
+  end
+
+  A1 --> A2 --> A3 --> A4 --> A5 --> A6 --> B1
+  A7 --> A8 --> B1
+  A9 --> A10 --> A11
+
+  style SS1 fill:#e3f2fd,stroke:#1565c0
+  style SS2 fill:#f3e5f5,stroke:#7b1fa2
+    </pre>
+  </section>
+
+  <!-- 图 3-3 SS-2 -->
+  <section id="ss2-arch">
+    <h2>图 3-3 SS-2 图像标注子系统架构图（3.3.4）</h2>
+    <p class="desc">
+      SS-2 是编辑器核心，所有标注操作经 EditorWidget 分发到 editor-core 纯函数，Immutable 变换后通过 Konva 重绘。
+      体现了 UI 与业务逻辑分离的设计原则。
+    </p>
+    <pre class="mermaid">
+flowchart LR
+  subgraph UI["EditorWidget 事件层"]
+    U1["用户操作\n马赛克/箭头/文字/裁剪"]
+    U2["工具栏事件"]
+  end
+
+  subgraph Core["editor-core 纯函数层"]
+    C1["addMosaicRect"]
+    C2["addArrow"]
+    C3["addText"]
+    C4["carveOverlappedMosaicRects"]
+    C5["splitNodeByRegion"]
+    C6["pushHistory"]
+    C7["exportCanvasToBlob"]
+  end
+
+  subgraph Render["Konva 渲染层"]
+    R1["Stage 重绘"]
+    R2["分层渲染\n背景→马赛克→标注→裁剪框"]
+  end
+
+  U1 --> C1
+  U1 --> C2
+  U1 --> C3
+  U2 --> C4
+  C4 --> C5
+  C1 --> C6
+  C2 --> C6
+  C3 --> C6
+  C6 --> R1 --> R2
+
+  style UI fill:#f3e5f5,stroke:#7b1fa2
+  style Core fill:#e3f2fd,stroke:#1565c0
+  style Render fill:#e8f5e9,stroke:#2e7d32
+    </pre>
+  </section>
+
+  <!-- 图 3-4 分层渲染 -->
+  <section id="layers">
+    <h2>图 3-4 分层渲染模型（3.3.4.1）</h2>
+    <p class="desc">
+      Konva Stage 渲染顺序自下而上：背景 → 马赛克 → 标注 → 裁剪框。
+      裁剪框交互时 zIndex=999 强制置顶，确保拖动时不被其他元素遮挡。
+    </p>
+    <pre class="mermaid">
+flowchart TB
+  subgraph Stage["Konva Stage 渲染顺序（自下而上）"]
+    L1["① 背景图片 Group\n截图底图 | 不可交互"]
+    L2["② 马赛克层\nmosaicRect + mosaicStroke\n按 updatedAt 排序 | 可选中/拖动/删除"]
+    L3["③ 标注层\n箭头 + 文字\nlayer='top' | 可编辑/拖动/修改样式"]
+    L4["④ 裁剪框 Group\nCropSelection + 8 handles\nzIndex=999 | 交互时强制置顶"]
+  end
+
+  L1 --> L2 --> L3 --> L4
+
+  style Stage fill:#f3e5f5,stroke:#7b1fa2
+    </pre>
+  </section>
+
+  <!-- 图 3-5 模板 CRUD -->
+  <section id="template-flow">
+    <h2>图 3-5 标注样式模板 CRUD 与命名解析图（3.3.4.2）</h2>
+    <p class="desc">
+      标注样式模板以 localStorage 持久化，支持保存、套用、重命名、删除四项操作。
+      命名规则支持 {n} 自动递增（如 医院记录{n} → 医院记录4），也支持自定义前缀与时间戳。
+    </p>
+    <pre class="mermaid">
+flowchart LR
+  subgraph Actions["用户操作"]
+    A1[保存模板]
+    A2[套用模板]
+    A3[重命名]
+    A4[删除]
+  end
+
+  subgraph Resolve["命名解析"]
+    NR1["纯序号 {n}\n医院记录{n} → 医院记录4"]
+    NR2["自定义前缀\n会议纪要_v2"]
+    NR3["时间戳\n模板_{timestamp}"]
+  end
+
+  subgraph Storage["template-storage.ts"]
+    S1["saveStyleTemplate()"]
+    S2["loadStyleTemplate()"]
+    S3["listStyleTemplates()"]
+    S4["deleteStyleTemplate()"]
+  end
+
+  subgraph LS["localStorage\nscreenshot_style_template_v1:*"]
+  end
+
+  A1 --> S1 --> LS
+  A2 --> S2 --> LS
+  A3 --> LS
+  A4 --> S4 --> LS
+  S3 --> LS
+
+  S1 -.-> Resolve
+    </pre>
+  </section>
+
+  <!-- 图 3-6 SS-3 -->
+  <section id="ss3-arch">
+    <h2>图 3-6 SS-3 工作区子系统架构图（3.3.5）</h2>
+    <p class="desc">
+      SS-3 管理多图队列与标签页，支持连续截图后快速切换、图层粘贴、标注模板一键套用。
+      体现了工作区对标注效率的整体提升。
+    </p>
+    <pre class="mermaid">
+flowchart LR
+  subgraph SS3["SS-3 工作区"]
+    direction TB
+    T1["[连续截图]"]
+    T2["[多图队列 tabs]"]
+    T3["[标签页切换]"]
+    T4["[EditorWidget 切换]"]
+    T5["[图层粘贴 Ctrl+V]"]
+    T6["[新图层加入]"]
+    T7["[模板套用]"]
+    T8["[一键应用样式]"]
+  end
+
+  subgraph SS2["SS-2 标注"]
+    B1["EditorWidget"]
+  end
+
+  subgraph Storage["template-storage"]
+    S1["localStorage"]
+  end
+
+  T1 --> T2 --> T3 --> T4 --> B1
+  T5 --> T6 --> B1
+  T7 --> T8 --> B1
+  T8 --> Storage
+
+  style SS3 fill:#e3f2fd,stroke:#1565c0
+  style SS2 fill:#f3e5f5,stroke:#7b1fa2
+  style Storage fill:#fff3e0,stroke:#ef6c00
+    </pre>
+  </section>
+
+  <!-- 图 3-7 SS-4 -->
+  <section id="ss4-ocr">
+    <h2>图 3-7 SS-4 OCR 识别与一键打码流程图（3.3.6）</h2>
+    <p class="desc">
+      SS-4 基于 Tesseract.js WASM 实现浏览器端文字区域检测，检测结果可一键批量生成马赛克节点进入 SS-2 编辑。
+      体现了自动化对重复标注效率的提升。
+    </p>
+    <pre class="mermaid">
+flowchart LR
+  subgraph SS4["SS-4 智能辅助"]
+    direction TB
+    O1["[用户点击 OCR]"]
+    O2["[Tesseract.js 加载 WASM]"]
+    O3["[文字区域检测]"]
+    O4["[返回检测框]"]
+    O5["[用户确认]"]
+    O6["[一键打码: mosaicRect]"]
+    O7["[进入 SS-2 可编辑]"]
+  end
+
+  subgraph SS2["SS-2 标注"]
+    B1["EditorWidget"]
+  end
+
+  O1 --> O2 --> O3 --> O4 --> O5 --> O6 --> O7 --> B1
+
+  style SS4 fill:#e3f2fd,stroke:#1565c0
+  style SS2 fill:#f3e5f5,stroke:#7b1fa2
+    </pre>
+  </section>
+
+  <!-- 图 3-8 SS-5 -->
+  <section id="ss5-output">
+    <h2>图 3-8 SS-5 输出子系统流程图（3.3.7）</h2>
+    <p class="desc">
+      SS-5 负责导出与保存，支持 PNG/JPEG 格式、自动命名规则、剪贴板写入，以及保存后打开目录。
+      自动保存路径无对话框直接落盘，提升批量操作效率。
+    </p>
+    <pre class="mermaid">
+flowchart LR
+  subgraph SS5["SS-5 输出"]
+    direction TB
+    E1["[用户点保存]"]
+    E2["{自动保存?}"]
+    E3["buildSaveDefaultFilename"]
+    E4["IPC saveFileAuto"]
+    E5["writeFile 落盘"]
+    E6["bumpSequence"]
+    E7["Toast 提示"]
+    E8["[弹出保存对话框]"]
+    E9["exportCanvasToBlob"]
+    E10["copyClipboard"]
+  end
+
+  E1 --> E2
+  E2 -- 是 --> E3 --> E4 --> E5 --> E6 --> E7
+  E2 -- 否 --> E8 --> E9
+  E9 --> E10
+
+  style SS5 fill:#e3f2fd,stroke:#1565c0
+    </pre>
+  </section>
+
+  <!-- 图 3-9 SS-6 -->
+  <section id="ss6-auth">
+    <h2>图 3-9 SS-6 用户鉴权子系统流程图（3.3.8）</h2>
+    <p class="desc">
+      SS-6 提供手机号注册/登录与 JWT 签发，桌面端生产模式通过鉴权门控拦截未登录的热键触发。
+      体现了本地认证服务与桌面端的安全交互模型。
+    </p>
+    <pre class="mermaid">
+flowchart LR
+  subgraph SS6["SS-6 用户鉴权"]
+    direction TB
+    A1["[用户输入手机号]"]
+    A2["POST /api/register/phone"]
+    A3["bcrypt 哈希密码"]
+    A4["写入 auth.json"]
+    A5["返回 201 成功"]
+    L1["[用户登录]"]
+    L2["POST /api/login/phone"]
+    L3["bcrypt.compare"]
+    L4["签发 JWT"]
+    L5["客户端保存 token"]
+    H1["[Alt+A 热键]"]
+    H2["检查 JWT"]
+    H3["有效 → 允许截图"]
+    H4["无效 → 弹登录窗口"]
+  end
+
+  A1 --> A2 --> A3 --> A4 --> A5
+  L1 --> L2 --> L3 --> L4 --> L5
+  H1 --> H2 --> H3
+  H2 --> H4
+
+  style SS6 fill:#e3f2fd,stroke:#1565c0
+    </pre>
+  </section>
+
+  <!-- 图 3-10 Web 插件 -->
+  <section id="web-plugin">
+    <h2>图 3-10 Web 插件集成架构图（3.3.9）</h2>
+    <p class="desc">
+      packages/web-plugin 将 EditorWidget 封装为 createEditor() 工厂函数，输出 UMD 与 ESM 两种格式，
+      支持第三方页面一行代码嵌入，实现跨端复用。
+    </p>
+    <pre class="mermaid">
+flowchart LR
+  subgraph Host["宿主网页"]
+    H1["div#editor"]
+    H2["script 引入"]
+  end
+
+  subgraph WP["web-plugin"]
+    W1["createEditor()"]
+    W2["normalizeImage"]
+    W3["EditorWidget"]
+    W4["EditorInstance API"]
+  end
+
+  subgraph Core["editor-core"]
+    C1["document/history/export"]
+  end
+
+  H1 --> W1
+  H2 --> W1
+  W1 --> W2 --> W3 --> Core
+  W1 --> W4
+
+  style Host fill:#e8f5e9,stroke:#2e7d32
+  style WP fill:#f3e5f5,stroke:#7b1fa2
+  style Core fill:#e3f2fd,stroke:#1565c0
+    </pre>
+  </section>
+
+  <script>
+    mermaid.initialize({ startOnLoad: true, theme: 'default', securityLevel: 'loose' });
+  </script>
+</body>
+</html>
